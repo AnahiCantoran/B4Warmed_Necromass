@@ -1,0 +1,218 @@
+---
+title: "ASV_QC"
+author: "Anahi Cantoran"
+date: "2024-09-17"
+output: html_document
+---
+
+# Clear environment
+```{r}
+rm(list = ls()) 
+```
+
+# Load libraries
+```{r}
+library(tidyverse)
+```
+
+# Set directory
+```{r}
+setwd("/Users/anahicantoran/Desktop/B4W_NecroCore/")
+```
+
+# Bacteria 
+
+## Read bacteria file
+```{r}
+Bacteria_raw <- read.delim(file = "Files/16S_combined_sequences_taxa_silva.txt", header = T)
+```
+
+
+## Filter and fix zeros 
+```{r}
+Bacteria_raw <- Bacteria_raw %>% filter(!Family %in% c("Mitochondria" )) %>%  filter(!Phylum %in% c("Cyanobacteria"))
+
+# Making a new df that will have controls subtracted
+Bac_minus_controls <- Bacteria_raw
+
+# Identify numeric columns
+numeric_cols <- sapply(Bac_minus_controls, is.numeric)
+
+# Calculate the maximum value from the negative DNA extraction control and negative necromass control (the one made during necro bag making) for each row
+#pmax function chooses the maximum value from two vectors, so our two negative controls here 
+max_neg_controls <- pmax(Bacteria_raw$NegControl.V4, Bacteria_raw$NegNecroControl.V4, na.rm = TRUE)
+
+# Subtract the maximum negative control value from each taxa row
+for (i in 1:nrow(Bac_minus_controls)) { # for every row in data_minus_controls
+  max_neg <- max_neg_controls[i]  # make every value from max neg controls as max neg
+  Bac_minus_controls[i, numeric_cols] <- Bac_minus_controls[i, numeric_cols] - max_neg #take every numeric column from data and subtract the max neg values 
+}
+
+view(Bac_minus_controls) #double check df, compare with original data set 
+
+# When the number is negative (meaning more in the control than in the sample) that is a good sign is a for sure contaminant and that ASV should be eliminated.
+# Here, well turn that to zero 
+Bac_minus_controls[Bac_minus_controls<0] <- 0
+
+#After accounting for the controls, based on the mock communities, it looks like any cell with 15 or less reads is potentially just noise and those cells should be zeroed 
+Bac_minus_controls[Bac_minus_controls<15] <- 0
+
+#double check df
+view(Bac_minus_controls) 
+
+#Ready to use! 
+```
+
+## Clean data set
+```{r}
+Bac <- Bac_minus_controls %>% select(-1,) #Get rid of sequence column
+Bac <- Bac %>%  select(144:150, everything()) #Lets move taxonomic information to the beginning of the df for simplicity
+
+# Get rid of the .V4 from the column names
+
+## Extract the taxanomic columns (non-sample columns)
+tax_columns <- colnames(Bac)[1:7]
+
+## Remove ".V4" suffix from column names 8:150 which are the samples
+new_column_names <- gsub("\\.V4", "", colnames(Bac)[8:150])
+
+## Combine the tax column names with modified column names
+new_column_names <- c(tax_columns, new_column_names)
+
+## Assign the new column names to the dataframe
+colnames(Bac) <- new_column_names
+
+
+#Lets add all counts if they share the same genus - resolution here will be to the genus level 
+# First pivot longer
+Bac_long <- Bac %>%  pivot_longer(cols = 8:150, names_to = "SampleID", values_to = "Counts")
+
+Bac_grouped <- Bac_long %>% group_by(Genus, SampleID) %>% summarise(TotalCounts = sum(Counts))
+
+#lets pivot wider
+Bac_grouped_W <- Bac_grouped %>%  pivot_wider(names_from = "SampleID", values_from = TotalCounts, values_fill = 0)
+
+#lets get rid of negative controls and mock communities
+Bac_W <- Bac_grouped_W %>% subset(select = -c(zymock,synmock,NegControl,NegNecroControl))
+
+#Clean
+Bac_W <- na.omit(Bac_W) 
+
+#Get rid of genus "0"? does not provide valuable info
+Bac_W <- Bac_W %>% filter(!Genus %in% c("0")) 
+
+```
+
+## Calculating relative abundance
+```{r}
+B_total_counts <- colSums(Bac_W[, 2:ncol(Bac_W)]) #calculate the column sums for each sample
+B_RA_W <- Bac_W #copy 
+# Divide each count in the taxa rows by the total count of the corresponding sample column
+B_RA_W [, 2:ncol(Bac_W)] <- t(t(Bac_W[, 2:ncol(Bac_W)]) / B_total_counts)
+# There is something about my df that is not calculating RA correctly unless I double transposed.. revisit######
+
+write.csv(B_RA_W, "/Users/anahicantoran/Desktop/B4W_NecroCore/Files/Bacteria_RA.csv", row.names=FALSE)
+```
+
+
+# Fungi
+### For the ITS table, the synmock looks great in having 11 ASVs as expected and the Zynmock too with 2 ASVs. Will need to apply the same process of accounting for the neg control counts ahead of zeroing, but it also looks like are going end somewhere in the 10-20 counts range for needed to zero all cells below that. 
+
+## Load Fungal data
+```{r}
+Fungi_raw <- read.table(file = "Files/ITS_combined_sequences_taxa.txt", header = T)
+```
+
+## Calculations
+## Clean out data 
+```{r}
+# Filter out non fungal ASVs
+Fungi_raw <- Fungi_raw %>% filter(Kingdom %in% c("k__Fungi")) 
+
+# Making a new df that will have controls substracted
+Fun_minus_controls <- Fungi_raw
+
+# Identify numeric columns
+numeric_cols <- sapply(Fun_minus_controls, is.numeric)
+
+# Calculate the maximum value from the negative DNA extraction control and negative necromass control (the one made during necro bag making) for each row
+#pmax function chooses the maximum value from two vectors, so our two negative controls here 
+max_neg_controls <- pmax(Fungi_raw$NegControl.ITS2, Fungi_raw$NegNecroControl.ITS2, na.rm = TRUE)
+
+# Subtract the maximum negative control value from each taxa row
+for (i in 1:nrow(Fun_minus_controls)) { # for every row in data_minus_controls
+  max_neg <- max_neg_controls[i]  # make every value from max neg controls as max neg
+  Fun_minus_controls[i, numeric_cols] <- Fun_minus_controls[i, numeric_cols] - max_neg #take every numeric column from data and subtract the max neg values 
+}
+
+view(Fun_minus_controls) #double check df, compare with original data set 
+
+# When the number is negative (meaning more in the control than in the sample) that is a good sign is a for sure contaminant and that ASV should be eliminated.
+# Here, well turn that to zero 
+Fun_minus_controls[Fun_minus_controls<0] <- 0
+
+#After accounting for the controls, based on the mock communities, it looks like any cell with 10 or less reads is potentially just noise and those cells should be zeroed 
+Fun_minus_controls[Fun_minus_controls<10] <- 0
+
+#double check df
+view(Fun_minus_controls) 
+
+#now let get rid of taxa (rows) that amount to zero
+Fun_minus_controls <- Fun_minus_controls %>% filter(rowSums(select(.,1:143)) !=0)
+
+#Ready to use! 
+```
+
+
+
+## Cleaning 
+```{r}
+Fun <- Fun_minus_controls # Make a copy
+
+Fun <- Fun %>% select(144:150, everything()) #Lets move taxonomic information to the beginning of the df for simplicity
+
+## Remove ".ITS2" prefix from column names 8:150 which are the samples
+new_column_names <- gsub("\\.ITS2", "", colnames(Fun)[8:150])
+
+## Extract the taxanomic columns (non-sample columns)
+tax_columns <- colnames(Fun)[1:7]
+
+## Combine the tax column names with modified column names
+new_column_names <- c(tax_columns, new_column_names)
+
+## Assign the new column names to the dataframe
+colnames(Fun) <- new_column_names
+
+#Lets add all counts if they share the same genus - resolution here will be to the genus level 
+# First pivot longer
+Fun_long <- Fun %>%  pivot_longer(cols = 8:150, names_to = "SampleID", values_to = "Counts")
+
+Fun_grouped <- Fun_long %>% group_by(Genus, SampleID) %>% summarise(TotalCounts = sum(Counts))
+
+#lets clean a bit here and get rid of the "g_" suffix
+# Remove "g_" suffix from names in the column
+Fun_grouped$Genus <- sub("^g__", "", Fun_grouped$Genus)
+
+#lets pivot wider
+Fun_grouped_W <- Fun_grouped %>%  pivot_wider(names_from = "SampleID", values_from = TotalCounts, values_fill = 0)
+
+#lets get rid of negative controls and mock communities
+Fun_W <- Fun_grouped_W %>% subset(select = -c(zymock,synmock,NegControl,NegNecroControl))
+
+#Clean
+Fun_W <- na.omit(Fun_W) 
+```
+
+## Calculating relative abundance
+```{r}
+F_total_counts <- colSums(Fun_W[, 2:ncol(Fun_W)]) #calculate the column sums for each sample
+F_RA_W <- Fun_W #copy 
+
+# Divide each count in the taxa rows by the total count of the corresponding sample column
+F_RA_W [, 2:ncol(Fun_W)] <- t(t(Fun_W[, 2:ncol(Fun_W)]) / F_total_counts)
+
+# There is something about my df that is not calculating RA correctly unless I double transposed.. revisit######
+
+ write.csv(F_RA_W, "/Users/anahicantoran/Desktop/B4W_NecroCore/Files/Fungi_RA.csv", row.names=FALSE)
+```
+
