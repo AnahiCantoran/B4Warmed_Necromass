@@ -1,0 +1,135 @@
+---
+title: "B4W_Climate"
+author: "Anahi Cantoran"
+date: "2024-06-26"
+output: html_document
+---
+
+# Clean Environment
+```{r}
+rm(list = ls()) 
+
+```
+
+# Load libraries
+```{r}
+library(tidyverse)
+```
+
+# Read Files
+```{r}
+ClimateData <- read.csv(file = "/Users/anahicantoran/Desktop/B4W_NecroCore/Files/B4W_Climate_2023.csv", header = T)
+ClimateData <- as.data.frame(ClimateData)
+```
+
+# Clean out climate data file
+
+```{r}
+#Filter out the plots that we used 
+Field <- ClimateData %>% filter(plot %in% c("d6", "d4", "e1", "e3", "f2", "f3"))
+
+
+#get rid of earlier days
+Field <- Field[-(1:17136),]
+```
+
+#Pull VWC info
+```{r}
+#pull relevant information and average the VWC by day
+Field_VWC <- Field %>% group_by(plot,doy,week,date) %>% summarise(avgWVC = mean(VWC)) %>% mutate(Treatment = ifelse(plot %in% c("d6", "e1", "f3"), "3.3C_redR", "ambC_ambR")) 
+  
+#convert vwc from inches to mm 
+Field_VWC <- Field_VWC %>% mutate(VWC_mm = avgWVC*25.4) #%>% mutate(TimeFrame = case_when(week %in% 27 ~ 1, 
+                                                                  #              week %in% 28:29 ~ 2,
+                                                                  #              week %in% 30:37 ~ 3,
+                                                                  #              week %in% 38:45 ~ 4))
+  
+#pull relevant information and average by week 
+Field_VWC_week <- Field_VWC %>% group_by(week, Treatment) %>% summarise(avgWVC_Wk = mean(avgWVC))
+
+
+#write.csv(Field_VWC,"~/Desktop/Field_VWC.csv", row.names = FALSE)
+
+ggplot(Field_VWC_week, aes(x=week, y=avgWVC_Wk, color = Treatment)) + geom_point()
+```
+
+#Pull Belowground Temp
+```{r}
+#pull relevant information and average the VWC by day
+Field_Temp <- Field %>% group_by(plot,doy,week,date) %>% summarise(avgTemp = mean(BelowgroundTempC)) %>% mutate(Treatment = ifelse(plot %in% c("d6", "e1", "f3"), "3.3C_redR", "ambC_ambR")) 
+
+#pull relevant information and average by week 
+Field_Temp_week <- Field_Temp %>% group_by(week, Treatment) %>% summarise(avgTemp_Wk = mean(avgTemp))
+
+
+write.csv(Field_Temp,"~/Desktop/Field_Temp.csv", row.names = FALSE)
+
+```
+
+# Read labeled files according to experimental dates 
+```{r}
+VWCData <- read.csv(file = "/Users/anahicantoran/Desktop/B4W_NecroCore/Files/Field_VWC.csv", header = T)
+TempData <- read.csv(file = "/Users/anahicantoran/Desktop/B4W_NecroCore/Files/Field_Temp.csv", header = T)
+
+VWCData$SampleID <- paste(VWCData$plot,VWCData$Treatment)
+
+```
+
+
+# Use field and culture data only 
+```{r}
+Fieldexp <- subset(VWCData,!is.na(week_exp))
+Fieldcult <- subset(VWCData, !is.na(week_cult))
+
+TempData <- subset(TempData, !is.na(week_exp))
+
+
+summary_exp <- Fieldexp %>% group_by(Treatment) %>% summarise_each(funs(mean,sd))
+summary_cult <- Fieldcult %>% group_by(Treatment) %>% summarise_each(funs(mean,sd))
+
+summary_temp <- TempData %>% group_by(Treatment) %>% summarise_each(funs(mean,sd))
+
+```
+
+# ANOVA for VWC ~ Treatment x Week 
+```{r}
+summary(aov(VWC_mm ~ Treatment + week_exp, data = Fieldexp))
+
+summary(aov(VWC_mm ~ Treatment + week_cult, data = Fieldexp))
+```
+
+
+# Plot field and culture data only
+```{r}
+
+ggplot(Fieldexp, aes(x=as.factor(week_exp), y=avgWVC, fill= Treatment)) + 
+  geom_boxplot() +
+  scale_fill_manual(values = c("3.3C_redR"='#B8062C', "ambC_ambR"= '#4992AB')) +
+  labs(x = "Week", y = "VWC (cm3 H2O/cm3 soil)") +
+  #scale_x_continuous(breaks = scales::pretty_breaks(n = 20)) +
+  scale_y_continuous(breaks = scales::pretty_breaks(n = 20)) +
+  theme_bw() + 
+  ylim(0,0.4) +
+  theme(legend.position = "bottom", axis.text = element_text(size=14), 
+        axis.title = element_text(size=18), legend.text  = element_text(size=14), legend.title = element_text(size = 18))
+
+#ggsave(file="Figures/Field_VWC.svg",width = 10, height = 6, dpi = 300)
+
+
+
+
+ggplot(TempData, aes(x=as.factor(week_exp), y=avgTemp, fill = Treatment)) + 
+  geom_boxplot() +
+  scale_fill_manual(values = c("3.3C_redR"='#B8062C', "ambC_ambR"= '#4992AB')) +
+  labs(x = "Week", y = "Temperature C") +
+    ylim(10,30)+
+  theme_bw() +
+ theme(legend.position = "none", axis.text = element_text(size=14), 
+        axis.title = element_text(size=16), legend.text  = element_text(size=14), legend.title = element_text(size = 16))
+
+
+#ggsave(file="Figures/Field_Temp.svg",width = 10, height = 6, dpi = 300)
+
+#Futher asthetics were developed in inkscape
+```
+
