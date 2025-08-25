@@ -1,0 +1,1222 @@
+---
+title: "B4W_Composition_REDO"
+output: html_document
+date: "2025-05-27"
+---
+
+# Clean Environment
+```{r}
+rm(list = ls()) 
+```
+
+# Load Microbial data
+```{r}
+F_RA_W <- read.csv(file = "/Volumes/WD_Passport/B4W_NecroCore/Files/Fungi_RA.csv", header = T)
+B_RA_W <- read.csv(file = "/Volumes/WD_Passport/B4W_NecroCore/Files/Bacteria_RA.csv", header = T)
+map <- read.csv("/Volumes/WD_Passport/B4W_NecroCore/Files/B4W_Times.csv", header = T)
+
+```
+
+# Load Packages
+```{r}
+library(tidyverse)
+library(nlme)
+library(zCompositions)
+library(CoDaSeq)
+library(vegan)
+library(cowplot)
+```
+
+
+# FUNGI - Clr, permanova, and PCA
+```{r}
+
+F_data_counts <-  F_RA_W %>% pivot_longer(cols = 2:140, names_to = "SampleID", values_to = "values")
+F_data_counts <- left_join(F_data_counts, map, by = "SampleID")
+
+# Filter for necromass field  samples only
+F_data_necro <- F_data_counts %>% filter(Deployment == "June")
+  
+F_data_necro <- F_data_necro %>% select(1:3)  
+F_data_necro <- F_data_necro %>% pivot_wider(names_from = SampleID, values_from = values)
+
+F_data_counts <- F_data_necro[, -1]            # Remove the genus column to keep only counts
+rownames(F_data_counts) <- F_data_necro[[1]]   # Set rownames as genus names
+
+
+#Convert dataframe to CLR abundances (see Gloor et al. (2017) for details)
+otu.mat.n0 <- cmultRepl(t(F_data_counts), method="CZM", label=0) 
+otu.mat.clr <- codaSeq.clr(otu.mat.n0)
+
+#Pull the rownames as sample IDs and combine with map file
+otu.samples <- rownames(F_data_counts) %>%  as.data.frame()
+otu.samples <- rename(otu.samples, SampleID = ".")
+
+otu.samples <- left_join(otu.samples, map, by = "SampleID")
+
+
+##One of the most common ways to assess the extent to which groups differ in community composition is run a permutational analysis of variance analysis (PERMANOVA). This can be done using the 'adonis' function in vegan.  Details about PERMANOVA are available in vegan manual - be aware that the order in which the predictor variables are listed can influence their significance.
+
+F_clr_necro <- otu.mat.clr
+
+#Pull the rownames as sample IDs and cobine with map file
+F_necro_map <- rownames(F_clr_necro) %>% as.data.frame()
+F_necro_map <- rename(F_necro_map, SampleID = ".")
+
+F_necro_map <- left_join(F_necro_map, map, by = "SampleID")
+
+
+#Running PERMANOVA - for CLR-based abundances the correct distances are Aithinson distances, which are equal to Euclidean. 
+perm_scheme <- how(blocks = F_necro_map$Block,
+                  #plots = Plots(strata=necro_map$Set),
+                   within = Within(type = "free"))
+
+
+permanova_necro <- adonis2(F_clr_necro ~F_necro_map$Treatment*F_necro_map$TimeFrame, permutations = perm_scheme, method = "euclidean", by = "terms")
+
+#Displaying re
+#Displaying results of PERMANOVA
+permanova_necro
+
+
+##A second analysis that should be run at the same time as a PERMANOVA analysis is a betadisper analysis (using the 'adonis' function in vegan). This second analysis assesses whether the variance (a.k.a. dispersion) in each grouping varaible is homogeneous or not. In effect, this is testing the extent to which the patterns in the PERMANOVA are robust. A significant betadisper result suggests that the differences between groups in the PERMANOVA may not just be due not to differences in centroid location in multivariate space. Instead
+
+#Calculate pair-wise distance matrix among all samples - for CLR-based abundances the correct distances are Aithinson distances, which are Euclidean.
+dist.clr <- dist(F_clr_necro)
+
+#Calculate betadisper
+betadisper1 <- betadisper(dist.clr, F_necro_map$Treatment, type = "centroid")
+
+#Display results of betadisper
+anova(betadisper1)
+
+#Visualize dispersion by grouping variable
+plot(betadisper1)
+
+#Visualize differences in dispersion between group variables with box plot
+boxplot(betadisper1)
+
+##Visualizing differences across treatment groups is a common community ecology analysis and pairs well with the PERMANOVA and betadisper analyses. In the Gloor et. al (2017) workflow, they recommend ordination as a way to visualize differences.  There are many other visualization options besides ordination. Non-metric multi-dimensional scaling (NMDS) is generally preferred (and can be done using the R package 'metaMDS').
+
+#Calculating principal components
+pcx <- prcomp(F_clr_necro)
+
+#Calculating principal component 1
+pc1 <- round(pcx$sdev[1]^2/sum(pcx$sdev^2),2)
+
+#Calculating principal component 2
+pc2 <- round(pcx$sdev[2]^2/sum(pcx$sdev^2),2)
+
+xlab <- paste("PC1: ", pc1, sep="")
+
+ylab <- paste("PC2: ", pc2, sep="")
+
+#Plotting the ordination
+biplot(pcx, cex=c(0.6,0.4), var.axes=F, scale=1, xlab=xlab, ylab=ylab)
+
+
+# Get PCA scores (sample coordinates)
+pca_scores <- as.data.frame(pcx$x)
+pca_scores$Treatment <- F_necro_map$Treatment 
+pca_scores$TimeFrame <- F_necro_map$TimeFrame
+pca_scores <-pca_scores %>% mutate(Time = ifelse(TimeFrame %in% c("k"), "Early", "Late")) 
+pca_scores <-pca_scores %>% mutate(Pairs = paste(Treatment,"-",Time))
+	
+
+# Plot PC1 vs PC2
+fungi_PCA <- ggplot(pca_scores, aes(x = PC1, y = PC2, color=Pairs, fill = Pairs)) +
+  geom_point( aes( shape =Pairs, colour = Pairs),size=2.5) + 
+    stat_ellipse(geom='polygon',level = 0.9, alpha = 0.5) + 
+  labs(x = xlab, y = ylab, title = "PCA of CLR-transformed data FUNGI") +
+  theme_bw() + scale_fill_manual(breaks = c("3.3C_redR - Early","ambC_ambR - Early",
+                                "3.3C_redR - Late","ambC_ambR - Late"), 
+                     values = c("3.3C_redR - Early"='#AE0037', "ambC_ambR - Early"= '#51A0C0',
+                                "3.3C_redR - Late"='#DBDBDB', "ambC_ambR - Late"= '#DBDBDB'),
+                     name = "Treatment") +
+  scale_colour_manual(breaks = c("3.3C_redR - Early","ambC_ambR - Early",
+                                  "3.3C_redR - Late","ambC_ambR - Late"), 
+                       values = c("3.3C_redR - Early"='#AE0037', "ambC_ambR - Early"= '#51A0C0', 
+                                 "3.3C_redR - Late"='#AE0037', "ambC_ambR - Late"= '#51A0C0'), 
+                                  name = "Treatment") +
+    scale_shape_manual(values=c(16,16, 1,1), name = "Treatment", 
+                     breaks = c("3.3C_redR - Early","ambC_ambR - Early",
+                                "3.3C_redR - Late","ambC_ambR - Late" )) 
+fungi_PCA
+
+
+```
+### Soil only PCA
+```{r}
+
+S_counts <-  F_RA_W %>% pivot_longer(cols = 2:140, names_to = "SampleID", values_to = "values")
+S_counts <- left_join(S_counts, map, by = "SampleID")
+
+# Filter for necromass field  samples only
+S_soil <- S_counts %>% filter(Deployment == "Initial ")
+  
+S_soil <- S_soil %>% select(1:3)  
+S_soil <- S_soil %>% pivot_wider(names_from = SampleID, values_from = values)
+
+S_counts <- S_soil[, -1]            # Remove the genus column to keep only counts
+rownames(S_counts) <-S_soil[[1]]   # Set rownames as genus names
+
+
+
+#Convert Sframe to CLR abundances (see Gloor et al. (2017) for details)
+otu.mat.n0 <- cmultRepl(t(S_counts), method="CZM", label=0) 
+otu.mat.clr <- codaSeq.clr(otu.mat.n0)
+
+#Pull the rownames as sample IDs and combine with map file
+otu.samples <- rownames(S_counts) %>%  as.data.frame()
+otu.samples <- rename(otu.samples, SampleID = ".")
+
+otu.samples <- left_join(otu.samples, map, by = "SampleID")
+
+
+clr_soil <- otu.mat.clr
+
+#Pull the rownames as sample IDs and cobine with map file
+soil_map <- rownames(clr_soil) %>% as.data.frame()
+soil_map <- rename(soil_map, SampleID = ".")
+
+soil_map <- left_join(soil_map, map, by = "SampleID")
+
+
+#Running PERMANOVA - for CLR-based abundances the correct distances are Aithinson distances, which are equal to Euclidean. 
+
+perm_scheme <- how(blocks = soil_map$Block,
+                  #plots = Plots(strata=necro_map$Set),
+                   within = Within(type = "free"))
+
+permanova_necro <- adonis2(clr_soil ~soil_map$Treatment, permutations = 999, method = "euclidean", by = "terms")
+
+#Displaying results of PERMANOVA
+permanova_necro
+
+#Calculating principal components
+pcx <- prcomp(clr_soil)
+
+#Calculating principal component 1
+pc1 <- round(pcx$sdev[1]^2/sum(pcx$sdev^2),2)
+
+#Calculating principal component 2
+pc2 <- round(pcx$sdev[2]^2/sum(pcx$sdev^2),2)
+
+xlab <- paste("PC1: ", pc1, sep="")
+
+ylab <- paste("PC2: ", pc2, sep="")
+
+#Plotting the ordination
+biplot(pcx, cex=c(0.6,0.4), var.axes=F, scale=1, xlab=xlab, ylab=ylab)
+
+
+# Get PCA scores (sample coordinates)
+pca_scores <- as.data.frame(pcx$x)
+pca_scores$Treatment <- soil_map$Treatment 
+
+
+# Plot PC1 vs PC2
+fungi_soil_PCA <- ggplot(pca_scores, aes(x = PC1, y = PC2, color=Treatment, fill = Treatment)) +
+  geom_point(size=2.5) + 
+    stat_ellipse(geom='polygon',level = 0.9, alpha = 0.5) + 
+  labs(x = xlab, y = ylab, title = "PCA of CLR-transformed data FUNGI") +
+  theme_bw() +  theme(legend.position = "right", axis.text = element_text(size=14), 
+        axis.title = element_text(size=18), title = element_text(size=18)) +
+  labs(title = "Fungi - Soil") +
+  scale_fill_manual(values = c("Soil_3.3C_redR"="#575757", "Soil_ambC_ambR"= "#BFBFBF"), name = "Treatment") +
+  scale_colour_manual(values = c("Soil_3.3C_redR"="#575757", "Soil_ambC_ambR"= "#BFBFBF"), name = "Treatment") 
+
+fungi_soil_PCA
+
+
+pca_res <- prcomp(clr_soil, scale = TRUE)
+soil_map$PC1 <- pca_res$x[,1]
+model_pc1 <- lme(PC1 ~ Treatment, random = ~1|Block/Set, data = soil_map)
+summary(model_pc1)
+summary(model_pc1)$tTable
+
+
+soil_map$PC2 <- pca_res$x[,2]
+model_pc2 <- lme(PC2 ~ Treatment, random = ~1|Block/Set, data = soil_map)
+summary(model_pc2)
+summary(model_pc2)$tTable
+
+
+```
+###Biolog only PCA
+```{r}
+Bio_counts <-  F_RA_W %>% pivot_longer(cols = 2:140, names_to = "SampleID", values_to = "values")
+Bio_counts <- left_join(Bio_counts, map, by = "SampleID")
+
+# Filter for necromass field  samples only
+data_bio <- Bio_counts %>% filter(Deployment == "August")
+  
+data_bio <- data_bio %>% select(1:3)  
+data_bio <- data_bio %>% pivot_wider(names_from = SampleID, values_from = values)
+
+data_counts <- data_bio[, -1]            # Remove the genus column to keep only counts
+rownames(data_counts) <-data_bio[[1]]   # Set rownames as genus names
+
+
+
+#Convert dataframe to CLR abundances (see Gloor et al. (2017) for details)
+otu.mat.n0 <- cmultRepl(t(data_counts), method="CZM", label=0) 
+otu.mat.clr <- codaSeq.clr(otu.mat.n0)
+
+#Pull the rownames as sample IDs and combine with map file
+otu.samples <- rownames(data_counts) %>%  as.data.frame()
+otu.samples <- rename(otu.samples, SampleID = ".")
+
+otu.samples <- left_join(otu.samples, map, by = "SampleID")
+
+
+clr_bio <- otu.mat.clr
+
+#Pull the rownames as sample IDs and cobine with map file
+bio_map <- rownames(clr_bio) %>% as.data.frame()
+bio_map <- rename(bio_map, SampleID = ".")
+
+bio_map <- left_join(bio_map, map, by = "SampleID")
+
+
+#Running PERMANOVA - for CLR-based abundances the correct distances are Aithinson distances, which are equal to Euclidean. 
+
+perm_scheme <- how(blocks = bio_map$Block,
+                  #plots = Plots(strata=necro_map$Set),
+                   within = Within(type = "free"))
+
+
+permanova_necro <- adonis2(clr_bio ~ bio_map$Treatment*bio_map$TimeFrame, permutations = perm_scheme, method = "euclidean", by = "terms")
+
+#Displaying results of PERMANOVA
+permanova_necro
+
+#Calculating principal components
+pcx <- prcomp(clr_bio)
+
+#Calculating principal component 1
+pc1 <- round(pcx$sdev[1]^2/sum(pcx$sdev^2),2)
+
+#Calculating principal component 2
+pc2 <- round(pcx$sdev[2]^2/sum(pcx$sdev^2),2)
+
+xlab <- paste("PC1: ", pc1, sep="")
+
+ylab <- paste("PC2: ", pc2, sep="")
+
+#Plotting the ordination
+biplot(pcx, cex=c(0.6,0.4), var.axes=F, scale=1, xlab=xlab, ylab=ylab)
+
+
+# Get PCA scores (sample coordinates)
+pca_scores <- as.data.frame(pcx$x)
+pca_scores$Treatment <- bio_map$Treatment 
+pca_scores$TimeFrame <- bio_map$TimeFrame
+pca_scores <-pca_scores %>% mutate(Time = ifelse(TimeFrame %in% c("k_Biolog"), "Early", "Late")) 
+pca_scores <-pca_scores %>% mutate(Pairs = paste(Treatment,"-",Time))
+	
+
+# Plot PC1 vs PC2
+fungi_bio_PCA <-  ggplot(pca_scores, aes(x = PC1, y = PC2, color=Pairs, fill = Pairs)) +
+  geom_point( aes( shape =Pairs, colour = Pairs),size=2.5) + 
+    stat_ellipse(geom='polygon',level = 0.9, alpha = 0.5) + 
+  labs(x = xlab, y = ylab, title = "PCA of CLR-transformed data FUNGI") +
+  theme_bw() +  theme(legend.position = "right", axis.text = element_text(size=14), 
+        axis.title = element_text(size=18), title = element_text(size=18)) +
+  labs(title = "Fungi - Soil") +
+ scale_fill_manual(breaks = c("3.3C_redR - Early","ambC_ambR - Early",
+                                "3.3C_redR - Late","ambC_ambR - Late"), 
+                     values = c("3.3C_redR - Early"='#AE0037', "ambC_ambR - Early"= '#51A0C0',
+                                "3.3C_redR - Late"='#DBDBDB', "ambC_ambR - Late"= '#DBDBDB'),
+                     name = "Treatment") +
+  scale_colour_manual(breaks = c("3.3C_redR - Early","ambC_ambR - Early",
+                                  "3.3C_redR - Late","ambC_ambR - Late"), 
+                       values = c("3.3C_redR - Early"='#AE0037', "ambC_ambR - Early"= '#51A0C0', 
+                                 "3.3C_redR - Late"='#AE0037', "ambC_ambR - Late"= '#51A0C0'), 
+                                  name = "Treatment") +
+    scale_shape_manual(values=c(16,16, 1,1), name = "Treatment", 
+                     breaks = c("3.3C_redR - Early","ambC_ambR - Early",
+                                "3.3C_redR - Late","ambC_ambR - Late" )) 
+fungi_bio_PCA
+
+
+pca_res <- prcomp(clr_bio, scale = TRUE)
+bio_map$PC1 <- pca_res$x[,1]
+model_pc1 <- lme(PC1 ~ Treatment*TimeFrame, random = ~1|Block/Set, data = bio_map)
+summary(model_pc1)
+summary(model_pc1)$tTable
+
+
+bio_map$PC2 <- pca_res$x[,2]
+model_pc2 <- lme(PC2 ~ Treatment*TimeFrame, random = ~1|Block/Set, data = bio_map)
+summary(model_pc2)
+summary(model_pc2)$tTable
+
+```
+
+## Deployment 
+```{r}
+counts <-  B_RA_W %>% pivot_longer(cols = 2:140, names_to = "SampleID", values_to = "values")
+counts <- left_join(counts, map, by = "SampleID")
+
+# Filter for necromass field  samples only
+data <- counts %>% filter(!Deployment == "Initial")
+  
+data_e <- data  %>% filter(Day == c("7", "14"))
+data_l <- data  %>% filter(Day == c("49", "98"))
+
+data_e_cut <- data_e %>% select(1:3)
+data_l_cut <- data_l %>% select(1:3)
+
+data_e_cut <- data_e_cut %>% pivot_wider(names_from = SampleID, values_from = values)
+
+
+data_l_cut  <- data_l_cut  %>% pivot_wider(names_from = SampleID, values_from = values)
+
+data_counts_e <- data_e_cut [, -1]            
+rownames(data_counts_e) <- data_e_cut [[1]]  
+
+
+data_counts_l <- data_l_cut [, -1]            
+rownames(data_counts_l) <- data_l_cut [[1]]  
+
+data <- data  %>% select(1:3)
+data <- data %>% pivot_wider(names_from = SampleID, values_from = values)
+
+
+data_counts_l <- data [, -1]            
+rownames(data_counts_l) <- data[[1]]  
+
+
+
+#Convert dataframe to CLR abundances (see Gloor et al. (2017) for details)
+otu.mat.n0 <- cmultRepl(t(data_counts_l), method="CZM", label=0) 
+otu.mat.clr <- codaSeq.clr(otu.mat.n0)
+
+#Pull the rownames as sample IDs and combine with map file
+otu.samples <- rownames(data_counts_e) %>%  as.data.frame()
+otu.samples <- rename(otu.samples, SampleID = ".")
+
+otu.samples <- left_join(otu.samples, map, by = "SampleID")
+
+
+clr_e <- otu.mat.clr
+
+#Pull the rownames as sample IDs and cobine with map file
+map_e <- rownames(clr_e) %>% as.data.frame()
+map_e <- rename(map_e, SampleID = ".")
+
+map_e <- left_join(map_e, map, by = "SampleID")
+
+
+#Running PERMANOVA - for CLR-based abundances the correct distances are Aithinson distances, which are equal to Euclidean. 
+
+perm_scheme <- how(blocks = map_e$Block,
+                  #plots = Plots(strata=necro_map$Set),
+                   within = Within(type = "free"))
+
+
+permanova_necro <- adonis2(clr_e ~ map_e$Treatment*map_e$Deployment, permutations = perm_scheme, method = "euclidean", by = "terms")
+
+#Displaying results of PERMANOVA
+permanova_necro
+
+```
+
+## Differential abundant 
+```{r}
+
+###As with the general alpha diversity metrics, none of the beta diversity analyses above provide any specific information on which specific taxa may be driving the community-level patterns. To assess differential abundance of specific OTUs across groups, ALDEx2 is the correct analysis to use for CLR-based abundances (if other abundance conversions are used, then a different test should be used (e.g. ALR abundances are used for ANCOM differential abundance analysis)). The ALDEx2 analysis will return a list of taxa that exhibit significant differential abundance between groups following multiple test correction (FDR). It will also return a list taxa with high effect sizes. The latter is a second way to assess the differential abundance that is less influenced by sample size. 
+
+#Loading ALDEx2
+library(ALDEx2)
+library(dplyr)
+
+
+data_counts <- F_RA_W[, -1]            # Remove the genus column to keep only counts
+rownames(data_counts) <-F_RA_W[[1]] 
+
+
+F_necro_map$SampleID <- as.character(F_necro_map$SampleID)
+
+# Filter df1 to keep only columns listed in df2
+df_filtered <- data_counts[, colnames(data_counts) %in% F_necro_map$SampleID, drop = FALSE]
+
+#Im interested in two time frames so each must have their own data set to see what taxa are differentially abundant within ech respective time frame 
+df_early <- df_filtered[, colnames(df_filtered) %in% F_necro_map$SampleID[F_necro_map$TimeFrame == "k"], drop = FALSE]
+
+df_late <- df_filtered[, colnames(df_filtered) %in% F_necro_map$SampleID[F_necro_map$TimeFrame == "A"], drop = FALSE]
+
+F_necro_map_e <- filter(F_necro_map, F_necro_map$TimeFrame == "k")
+F_necro_map_l <- filter(F_necro_map, F_necro_map$TimeFrame == "A")
+
+# Example: multiply by 1,000 or 10,000 to restore integer scale
+reads_e <- df_early * 10000
+reads_e <- round(reads_e)
+
+reads_l <- df_late * 10000
+reads_l <- round(reads_l)
+
+# Convert to integer explicitly
+reads_e <- as.data.frame(lapply(reads_e, as.integer), row.names = rownames(df_early))
+reads_l <- as.data.frame(lapply(reads_l, as.integer), row.names = rownames(df_late))
+
+reads_e <- cmultRepl(t(reads_e), method="CZM", label=0) 
+reads_e <- codaSeq.clr(reads_e)
+
+
+#Estimating the distribution of CLR values
+otu.iso.early <- aldex.clr(reads_e, conds=as.character(necro_map_e$Treatment), mc.samples = 250, denom = "all", verbose = TRUE)
+
+otu.iso.late <- aldex.clr(reads_l, conds=as.character(necro_map_l$Treatment), mc.samples = 250, denom = "all", verbose = TRUE)
+
+#Generating the expected CLR value for each OTU along with expected value of effect sizes
+otu.iso.e.early <- aldex.effect(otu.iso.early, include.sample.summary=TRUE, verbose=FALSE)
+otu.iso.e.late <- aldex.effect(otu.iso.late, include.sample.summary=TRUE, verbose=FALSE)
+
+#calculate expected P values
+otu.iso.t.early <- aldex.ttest(otu.iso.early)
+otu.iso.t.late <- aldex.ttest(otu.iso.late)
+
+#Selecting the OTUs with significant different abundance 
+low.p.id.early <- rownames(otu.iso.t.early)[which(otu.iso.t.early$we.eBH < 0.05)]
+low.p.early=which(otu.iso.t.early$we.eBH < 0.05)
+
+low.p.id.late <- rownames(otu.iso.t.late)[which(otu.iso.t.late$we.eBH < 0.05)]
+low.p.late=which(otu.iso.t.late$we.eBH < 0.05)
+
+#Displaying significant OTUs
+fun.all.early <- low.p.id.early
+fun.all.late <- low.p.id.late
+
+#Selecting the OTUs with effect size greater than 1 
+high.e.id.early <- rownames(otu.iso.t.early)[which(abs(otu.iso.e.early$effect) >=1)]
+high.e.early=which(abs(otu.iso.e.early$effect) >=1)
+
+high.e.id.late <- rownames(otu.iso.t.late)[which(abs(otu.iso.e.late$effect) >=1)]
+high.e.late =which(abs(otu.iso.e.late$effect) >=1)
+
+
+#Displaying high effect size OTUs
+fun.early <- high.e.id.early
+fun.late  <- high.e.id.late
+
+
+#Listing effect sizes for all OTUs
+
+#Make summary table of low.p and high.e OTUs
+diff.abund.table <- rbind(low.p.id,high.e.id)
+
+#Exporting summary table to .csv file
+#write.csv(diff.abund.table, "diff.abund.table.csv")
+
+```
+
+
+# BACTERIA - Clr, permanova, and PCA
+```{r}
+B_counts <-  B_RA_W %>% pivot_longer(cols = 2:140, names_to = "SampleID", values_to = "values")
+B_counts <- left_join(B_counts, map, by = "SampleID")
+
+# Filter for necromass field  samples only
+B_necro <- B_counts %>% filter(Deployment == "June")
+  
+B_necro <- B_necro %>% select(1:3)  
+B_necro <- B_necro %>% pivot_wider(names_from = SampleID, values_from = values)
+
+B_counts <- B_necro[, -1]            # Remove the genus column to keep only counts
+rownames(B_counts) <-B_necro[[1]]   # Set rownames as genus names
+
+
+#Convert dataframe to CLR abundances 
+otu.mat.n0 <- cmultRepl(t(B_counts), method="CZM", label=0) 
+otu.mat.clr <- codaSeq.clr(otu.mat.n0)
+
+#Pull the rownames as sample IDs and cobine with map file
+otu.samples <- rownames(otu.mat.clr) %>% as.data.frame()
+otu.samples <- rename(otu.samples, SampleID = ".")
+
+otu.samples <- left_join(otu.samples, map, by = "SampleID")
+
+
+
+clr_necro <- otu.mat.clr
+bac_clr <- otu.mat.clr
+
+#Pull the rownames as sample IDs and cobine with map file
+necro_map <- rownames(clr_necro) %>% as.data.frame()
+necro_map <- rename(necro_map, SampleID = ".")
+
+necro_map <- left_join(necro_map, map, by = "SampleID")
+
+
+#Running PERMANOVA - for CLR-based abundances the correct distances are Aithinson distances, which are equal to Euclidean. 
+
+perm_scheme <- how(blocks = necro_map$Block,
+                  #plots = Plots(strata=necro_map$Set),
+                   within = Within(type = "free"))
+
+
+permanova_necro <- adonis2(clr_necro ~necro_map$Treatment*necro_map$TimeFrame, permutations = perm_scheme, method = "euclidean", by = "terms")
+
+#Displaying results of PERMANOVA
+permanova_necro
+
+
+#Calculate pair-wise distance matrix among all samples - for CLR-based abundances the correct distances are Aithinson distances, which are Euclidean.
+dist.clr <- dist(clr_necro)
+
+#Calculate betadisper
+betadisper1 <- betadisper(dist.clr, necro_map$Treatment, type = "centroid")
+
+#Display results of betadisper
+anova(betadisper1)
+
+#Visualize dispersion by grouping variable
+plot(betadisper1)
+
+#Visualize differences in dispersion between group variables with box plot
+boxplot(betadisper1)
+
+##Visualizing differences across treatment groups is a common community ecology analysis and pairs well with the PERMANOVA and betadisper analyses. In the Gloor et. al (2017) workflow, they recommend ordination as a way to visualize differences.  There are many other visualization options besides ordination. Non-metric multi-dimensional scaling (NMDS) is generally preferred (and can be done using the R package 'metaMDS').
+
+#Calculating principal components
+pcx <- prcomp(clr_necro)
+
+#Calculating principal component 1
+pc1 <- round(pcx$sdev[1]^2/sum(pcx$sdev^2),2)
+
+#Calculating principal component 2
+pc2 <- round(pcx$sdev[2]^2/sum(pcx$sdev^2),2)
+
+xlab <- paste("PC1: ", pc1, sep="")
+
+ylab <- paste("PC2: ", pc2, sep="")
+
+#Plotting the ordination
+biplot(pcx, cex=c(0.6,0.4), var.axes=F, scale=1, xlab=xlab, ylab=ylab)
+#plot(pcx, type="n", scaling="sites")
+#text(pcx, dis="wa", scaling="sites")
+#ordiellipse(pcx, map$Host, kind="se", conf=0.95, lwd=2, draw = "polygon", col=1:2, border=1:2, alpha=63)
+
+
+# Get PCA scores (sample coordinates)
+pca_scores <- as.data.frame(pcx$x)
+pca_scores$Treatment <- necro_map$Treatment 
+pca_scores$TimeFrame <- necro_map$TimeFrame
+pca_scores <-pca_scores %>% mutate(Time = ifelse(TimeFrame %in% c("k"), "Early", "Late")) 
+pca_scores <-pca_scores %>% mutate(Pairs = paste(Treatment,"-",Time))
+	
+
+# Plot PC1 vs PC2
+bacteria_pca <- ggplot(pca_scores, aes(x = PC1, y = PC2, color=Pairs, fill = Pairs)) +
+  geom_point( aes( shape =Pairs, colour = Pairs),size=2.5) + 
+    stat_ellipse(geom='polygon',level = 0.9, alpha = 0.5) + 
+  labs(x = xlab, y = ylab, title = "PCA of CLR-transformed data BACTERIA") +
+  theme_bw() + scale_fill_manual(breaks = c("3.3C_redR - Early","ambC_ambR - Early",
+                                "3.3C_redR - Late","ambC_ambR - Late"), 
+                     values = c("3.3C_redR - Early"='#AE0037', "ambC_ambR - Early"= '#51A0C0',
+                                "3.3C_redR - Late"='#DBDBDB', "ambC_ambR - Late"= '#DBDBDB'),
+                     name = "Treatment") +
+  scale_colour_manual(breaks = c("3.3C_redR - Early","ambC_ambR - Early",
+                                  "3.3C_redR - Late","ambC_ambR - Late"), 
+                       values = c("3.3C_redR - Early"='#AE0037', "ambC_ambR - Early"= '#51A0C0', 
+                                 "3.3C_redR - Late"='#AE0037', "ambC_ambR - Late"= '#51A0C0'), 
+                                  name = "Treatment") +
+    scale_shape_manual(values=c(16,16, 1,1), name = "Treatment", 
+                     breaks = c("3.3C_redR - Early","ambC_ambR - Early",
+                                "3.3C_redR - Late","ambC_ambR - Late" )) 
+bacteria_pca
+
+#pca_res <- prcomp(clr_necro, scale = TRUE)
+#necro_map$PC2 <- pca_res$x[,2]
+#model_pc1 <- lme(PC1 ~ Treatment*TimeFrame, random = ~1|Block/Set, data = necro_map)
+#summary(model_pc1)
+#summary(model_pc1)$tTable
+
+
+#model_pc2 <- lme(PC2 ~ Treatment*TimeFrame, random = ~1|Block/Set, data = necro_map)
+#summary(model_pc2)
+#summary(model_pc2)$tTable
+
+
+
+```
+###Soil only PCA
+```{r}
+
+SB_counts <-  B_RA_W %>% pivot_longer(cols = 2:140, names_to = "SampleID", values_to = "values")
+SB_counts <- left_join(SB_counts, map, by = "SampleID")
+
+# Filter for necromass field  samples only
+SB_soil <- SB_counts %>% filter(Deployment == "Initial ")
+  
+SB_soil <- SB_soil %>% select(1:3)  
+SB_soil <- SB_soil %>% pivot_wider(names_from = SampleID, values_from = values)
+
+SB_counts <- SB_soil[, -1]            # Remove the genus column to keep only counts
+rownames(SB_counts) <-SB_soil[[1]]   # Set rownames as genus names
+
+
+
+#Convert dataframe to CLR abundances (see Gloor et al. (2017) for details)
+otu.mat.n0 <- cmultRepl(t(SB_counts), method="CZM", label=0) 
+otu.mat.clr <- codaSeq.clr(otu.mat.n0)
+
+#Pull the rownames as sample IDs and combine with map file
+otu.samples <- rownames(SB_counts) %>%  as.data.frame()
+otu.samples <- rename(otu.samples, SampleID = ".")
+
+otu.samples <- left_join(otu.samples, map, by = "SampleID")
+
+
+clr_soil <- otu.mat.clr
+
+#Pull the rownames as sample IDs and cobine with map file
+soil_map <- rownames(clr_soil) %>% as.data.frame()
+soil_map <- rename(soil_map, SampleID = ".")
+
+soil_map <- left_join(soil_map, map, by = "SampleID")
+
+
+#Running PERMANOVA - for CLR-based abundances the correct distances are Aithinson distances, which are equal to Euclidean. 
+
+
+perm_scheme <- how(blocks = soil_map$Block,
+                  #plots = Plots(strata=necro_map$Set),
+                   within = Within(type = "free"))
+
+permanova_necro <- adonis2(clr_soil ~soil_map$Treatment, permutations = perm_scheme, method = "euclidean", by = "terms")
+
+#Displaying results of PERMANOVA
+permanova_necro
+
+#Calculating principal components
+pcx <- prcomp(clr_soil)
+
+#Calculating principal component 1
+pc1 <- round(pcx$sdev[1]^2/sum(pcx$sdev^2),2)
+
+#Calculating principal component 2
+pc2 <- round(pcx$sdev[2]^2/sum(pcx$sdev^2),2)
+
+xlab <- paste("PC1: ", pc1, sep="")
+
+ylab <- paste("PC2: ", pc2, sep="")
+
+#Plotting the ordination
+biplot(pcx, cex=c(0.6,0.4), var.axes=F, scale=1, xlab=xlab, ylab=ylab)
+
+
+# Get PCA scores (sample coordinates)
+pca_scores <- as.data.frame(pcx$x)
+pca_scores$Treatment <- soil_map$Treatment 
+
+
+# Plot PC1 vs PC2
+bac_soil_PCA <- ggplot(pca_scores, aes(x = PC1, y = PC2, color=Treatment, fill = Treatment)) +
+  geom_point(size=2.5) + 
+    stat_ellipse(geom='polygon',level = 0.9, alpha = 0.5) + 
+  labs(x = xlab, y = ylab, title = "PCA of CLR-transformed data FUNGI") +
+  theme_bw() +  theme(legend.position = "right", axis.text = element_text(size=14), 
+        axis.title = element_text(size=18), title = element_text(size=18)) +
+  labs(title = "Bacteria - Soil") +
+  scale_fill_manual(values = c("Soil_3.3C_redR"="#575757", "Soil_ambC_ambR"= "#BFBFBF"), name = "Treatment") +
+  scale_colour_manual(values = c("Soil_3.3C_redR"="#575757", "Soil_ambC_ambR"= "#BFBFBF"), name = "Treatment") 
+
+bac_soil_PCA
+
+
+pca_res <- prcomp(clr_soil, scale = TRUE)
+soil_map$PC1 <- pca_res$x[,1]
+model_pc1 <- lme(PC1 ~ Treatment, random = ~1|Block/Set, data = soil_map)
+summary(model_pc1)
+summary(model_pc1)$tTable
+
+
+soil_map$PC2 <- pca_res$x[,2]
+model_pc2 <- lme(PC2 ~ Treatment, random = ~1|Block/Set, data = soil_map)
+summary(model_pc2)
+summary(model_pc2)$tTable
+
+```
+### Biolog only PCA
+```{r}
+data_counts <-  B_RA_W %>% pivot_longer(cols = 2:140, names_to = "SampleID", values_to = "values")
+data_counts <- left_join(data_counts, map, by = "SampleID")
+
+# Filter for necromass field  samples only
+data_bio <- data_counts %>% filter(Deployment == "August")
+  
+data_bio <- data_bio %>% select(1:3)  
+
+data_bio <- data_bio %>% pivot_wider(names_from = SampleID, values_from = values)
+
+#data_bio <- data_bio %>%  filter_all(any_vars(!is.na(.)))
+
+
+ 
+data_counts <- data_bio[, -1]            # Remove the genus column to keep only counts
+rownames(data_counts) <- data_bio[[1]]   # Set rownames as genus names
+
+
+
+#Convert dataframe to CLR abundances (see Gloor et al. (2017) for details)
+otu.mat.n0 <- cmultRepl(t(data_counts), method="CZM", label=0) 
+otu.mat.clr <- codaSeq.clr(otu.mat.n0)
+
+#Pull the rownames as sample IDs and combine with map file
+otu.samples <- rownames(data_counts) %>%  as.data.frame()
+otu.samples <- rename(otu.samples, SampleID = ".")
+
+otu.samples <- left_join(otu.samples, map, by = "SampleID")
+
+
+clr_bio <- otu.mat.clr
+
+#Pull the rownames as sample IDs and cobine with map file
+bio_map <- rownames(clr_bio) %>% as.data.frame()
+bio_map <- rename(bio_map, SampleID = ".")
+
+bio_map <- left_join(bio_map, map, by = "SampleID")
+
+
+#Running PERMANOVA - for CLR-based abundances the correct distances are Aithinson distances, which are equal to Euclidean. 
+perm_scheme <- how(blocks = bio_map$Block,
+                  #plots = Plots(strata=necro_map$Set),
+                   within = Within(type = "free"))
+
+
+permanova_necro <- adonis2(clr_bio ~ bio_map$Treatment*bio_map$TimeFrame, permutations = perm_scheme, method = "euclidean", by = "terms")
+
+
+
+ #Displaying results of PERMANOVA
+permanova_necro
+
+
+
+#Calculating principal components
+pcx <- prcomp(clr_bio)
+
+#Calculating principal component 1
+pc1 <- round(pcx$sdev[1]^2/sum(pcx$sdev^2),2)
+
+#Calculating principal component 2
+pc2 <- round(pcx$sdev[2]^2/sum(pcx$sdev^2),2)
+
+xlab <- paste("PC1: ", pc1, sep="")
+
+ylab <- paste("PC2: ", pc2, sep="")
+
+#Plotting the ordination
+biplot(pcx, cex=c(0.6,0.4), var.axes=F, scale=1, xlab=xlab, ylab=ylab)
+
+
+# Get PCA scores (sample coordinates)
+pca_scores <- as.data.frame(pcx$x)
+pca_scores$Treatment <- bio_map$Treatment 
+pca_scores$TimeFrame <- bio_map$TimeFrame
+pca_scores <-pca_scores %>% mutate(Time = ifelse(TimeFrame %in% c("k_Biolog"), "Early", "Late")) 
+pca_scores <-pca_scores %>% mutate(Pairs = paste(Treatment,"-",Time))
+	
+
+# Plot PC1 vs PC2
+bac_bio_PCA <-  ggplot(pca_scores, aes(x = PC1, y = PC2, color=Pairs, fill = Pairs)) +
+  geom_point( aes( shape =Pairs, colour = Pairs),size=2.5) + 
+    stat_ellipse(geom='polygon',level = 0.9, alpha = 0.5) + 
+  labs(x = xlab, y = ylab, title = "PCA of CLR-transformed data FUNGI") +
+  theme_bw() +  theme(legend.position = "right", axis.text = element_text(size=14), 
+        axis.title = element_text(size=18), title = element_text(size=18)) +
+  labs(title = "Bacteria - Biolog") +
+ scale_fill_manual(breaks = c("3.3C_redR - Early","ambC_ambR - Early",
+                                "3.3C_redR - Late","ambC_ambR - Late"), 
+                     values = c("3.3C_redR - Early"='#AE0037', "ambC_ambR - Early"= '#51A0C0',
+                                "3.3C_redR - Late"='#DBDBDB', "ambC_ambR - Late"= '#DBDBDB'),
+                     name = "Treatment") +
+  scale_colour_manual(breaks = c("3.3C_redR - Early","ambC_ambR - Early",
+                                  "3.3C_redR - Late","ambC_ambR - Late"), 
+                       values = c("3.3C_redR - Early"='#AE0037', "ambC_ambR - Early"= '#51A0C0', 
+                                 "3.3C_redR - Late"='#AE0037', "ambC_ambR - Late"= '#51A0C0'), 
+                                  name = "Treatment") +
+    scale_shape_manual(values=c(16,16, 1,1), name = "Treatment", 
+                     breaks = c("3.3C_redR - Early","ambC_ambR - Early",
+                                "3.3C_redR - Late","ambC_ambR - Late" )) 
+bac_bio_PCA
+
+
+#pca_res <- prcomp(clr_bio, scale = TRUE)
+#bio_map$PC1 <- pca_res$x[,1]
+##model_pc1 <- lme(PC1 ~ Treatment*TimeFrame, random = ~1|Block/Set, data = bio_map)
+#summary(model_pc1)
+#summary(model_pc1)$tTable
+
+
+#bio_map$PC2 <- pca_res$x[,2]
+#model_pc2 <- lme(PC2 ~ Treatment*TimeFrame, random = ~1|Block/Set, data = bio_map)
+#summary(model_pc2)
+#summary(model_pc2)$tTable
+
+```
+
+##Deployment
+```{r}
+
+data <- rbind(bio_map, necro_map)
+
+#Running PERMANOVA - for CLR-based abundances the correct distances are Aithinson distances, which are equal to Euclidean. 
+perm_scheme <- how(blocks = data$Block,
+                  #plots = Plots(strata=necro_map$Set),
+                   within = Within(type = "free"))
+
+
+permanova_necro <- adonis2(clr_bio ~ data$Treatment*data$TimeFrame, permutations = perm_scheme, method = "euclidean", by = "terms")
+
+
+
+ #Displaying results of PERMANOVA
+permanova_necro
+
+
+```
+
+
+
+### Differential abundance
+```{r}
+#Loading ALDEx2
+library(ALDEx2)
+library(dplyr)
+
+data_counts <- F_RA_W[, -1]            # Remove the genus column to keep only counts
+rownames(data_counts) <-F_RA_W[[1]] 
+
+necro_map$SampleID <- as.character(necro_map$SampleID)
+
+# Filter df1 to keep only columns listed in df2
+df_filtered <- data_counts[, colnames(data_counts) %in% necro_map$SampleID, drop = FALSE]
+
+df_early <- df_filtered[, colnames(df_filtered) %in% necro_map$SampleID[necro_map$TimeFrame == "k"], drop = FALSE]
+
+df_late <- df_filtered[, colnames(df_filtered) %in% necro_map$SampleID[necro_map$TimeFrame == "A"], drop = FALSE]
+
+necro_map_e <- filter(necro_map, necro_map$TimeFrame == "k")
+necro_map_l <- filter(necro_map, necro_map$TimeFrame == "A")
+
+# Example: multiply by 1,000 or 10,000 to restore integer scale
+reads_e <- df_early * 10000
+reads_e <- round(reads_e)
+
+reads_l <- df_late * 10000
+reads_l <- round(reads_l)
+
+# Convert to integer explicitly
+reads_e <- as.data.frame(lapply(reads_e, as.integer), row.names = rownames(df_early))
+reads_l <- as.data.frame(lapply(reads_l, as.integer), row.names = rownames(df_late))
+
+
+#Estimating the distribution of CLR values
+otu.iso.early <- aldex.clr(reads_e, conds=as.character(necro_map_e$Treatment), mc.samples = 250, denom = "all", verbose = TRUE)
+
+otu.iso.late <- aldex.clr(reads_l, conds=as.character(necro_map_l$Treatment), mc.samples = 250, denom = "all", verbose = TRUE)
+
+#Generating the expected CLR value for each OTU along with expected value of effect sizes
+otu.iso.e.early <- aldex.effect(otu.iso.early, include.sample.summary=TRUE, verbose=FALSE)
+otu.iso.e.late <- aldex.effect(otu.iso.late, include.sample.summary=TRUE, verbose=FALSE)
+
+#calculate expected P values
+otu.iso.t.early <- aldex.ttest(otu.iso.early)
+otu.iso.t.late <- aldex.ttest(otu.iso.late)
+
+#Selecting the OTUs with significant different abundance 
+low.p.id.early <- rownames(otu.iso.t.early)[which(otu.iso.t.early$we.eBH < 0.05)]
+low.p.early=which(otu.iso.t.early$we.eBH < 0.05)
+
+low.p.id.late <- rownames(otu.iso.t.late)[which(otu.iso.t.late$we.eBH < 0.05)]
+low.p.late=which(otu.iso.t.late$we.eBH < 0.05)
+
+#Displaying significant OTUs
+bac.all.early <- low.p.id.early
+bac.all.late <- low.p.id.late
+
+#Selecting the OTUs with effect size greater than 1 
+high.e.id.early <- rownames(otu.iso.t.early)[which(abs(otu.iso.e.early$effect) >=1)]
+high.e.early=which(abs(otu.iso.e.early$effect) >=1)
+
+high.e.id.late <- rownames(otu.iso.t.late)[which(abs(otu.iso.e.late$effect) >=1)]
+high.e.late =which(abs(otu.iso.e.late$effect) >=1)
+
+
+#Displaying high effect size OTUs
+bac.early <- high.e.id.early
+bac.late <- high.e.id.late
+
+```
+
+#PCA figure
+```{r}
+library(cowplot)
+
+ plot_grid(bacteria_pca + theme(legend.position="none"),
+           fungi_PCA+ theme(legend.position="right"),
+           align = "h", rel_widths = c(1.2, 1.7),
+           labels = c("A", "B"), label_size = 18,
+           nrow = 1
+           )
+ 
+ggsave(file="/Volumes/WD_Passport/B4W_NecroCore/Figures/Community/Field_Necro_PCA.svg",width = 10, height = 5, dpi = 300)
+
+
+plot_grid(bac_soil_PCA + theme(legend.position="none"),
+           fungi_soil_PCA+ theme(legend.position="none"),
+           align = "h", rel_widths = c(1.4, 1.5),
+           labels = c("A", "B"), label_size = 18,
+           nrow = 1
+           )
+
+ggsave(file="/Volumes/WD_Passport/B4W_NecroCore/Figures/Community/soil_PCA.svg",width = 10, height = 5, dpi = 300)
+
+
+plot_grid(bac_bio_PCA + theme(legend.position="none"),
+           fungi_bio_PCA+ theme(legend.position="none"),
+           align = "h", rel_widths = c(1.4, 1.5),
+           labels = c("A", "B"), label_size = 18,
+           nrow = 1
+           )
+
+ggsave(file="/Volumes/WD_Passport/B4W_NecroCore/Figures/Community/Biologs_PCA.svg",width = 10, height = 5, dpi = 300)
+
+```
+
+#Top biolog taxa
+```{r}
+F_clr <- clr_bio %>% t() %>% as.data.frame() %>% tibble::rownames_to_column(var = "Genus")
+
+
+F_clr <- F_clr %>% pivot_longer(cols = 2:21, names_to = "SampleID", values_to = "clr")
+
+fun_clr_l<- left_join(F_clr, map, by = "SampleID")
+
+
+Fun_bio_summary <- fun_clr_l %>% group_by(Genus) %>% summarise(mean=mean(clr), sd=sd(clr))
+
+
+B_clr <- clr_bio  %>% t() %>% as.data.frame() %>% tibble::rownames_to_column(var = "Genus")
+B_clr <- B_clr %>% pivot_longer(cols = 2:17, names_to = "SampleID", values_to = "clr")
+
+bac_clr_l<- left_join(B_clr, map, by = "SampleID")
+
+
+bac_bio_summary <- bac_clr_l %>% group_by(Genus) %>% summarise(mean=mean(clr), sd=sd(clr))
+
+```
+
+#Top soil data
+```{r}
+F_clr <- clr_soil %>% t() %>% as.data.frame() %>% tibble::rownames_to_column(var = "Genus")
+
+
+F_clr <- F_clr %>% pivot_longer(cols = 2:25, names_to = "SampleID", values_to = "clr")
+
+fun_clr_l<- left_join(F_clr, map, by = "SampleID")
+
+
+Fun_bio_summary <- fun_clr_l %>% group_by(Genus, Treatment) %>% summarise(mean=mean(clr), sd=sd(clr))
+
+
+B_clr <- clr_soil%>% t() %>% as.data.frame() %>% tibble::rownames_to_column(var = "Genus")
+B_clr <- B_clr %>% pivot_longer(cols = 2:24, names_to = "SampleID", values_to = "clr")
+
+bac_clr_l<- left_join(B_clr, map, by = "SampleID")
+
+
+bac_bio_summary <- bac_clr_l %>% group_by(Genus, Treatment) %>% summarise(mean=mean(clr), sd=sd(clr))
+
+```
+
+
+# Plotting cohens for the Aldex2 diffential abundant bacteria 
+```{r}
+
+F_clr <- F_clr_necro %>% t() %>% as.data.frame() %>% tibble::rownames_to_column(var = "Genus")
+F_clr <- F_clr %>% pivot_longer(cols = 2:95, names_to = "SampleID", values_to = "clr")
+
+
+B_clr <- bac_clr %>% t() %>% as.data.frame() %>% tibble::rownames_to_column(var = "Genus")
+B_clr <- B_clr %>% pivot_longer(cols = 2:96, names_to = "SampleID", values_to = "clr")
+
+
+B_clr <- B_clr %>% mutate(Genus = case_when(
+    str_detect(Genus, "Allorhizobium|Neorhizobium|Pararhizobium|Rhizobium") ~ "Allorhizobium",
+    str_detect(Genus, "Burkholderia|Caballeronia|Paraburkholderia") ~ "Burkholderia",
+    TRUE ~ Genus
+  ))
+
+# Make list dependent on top15  most overall positive clrs 
+Bac_list <- list("Pseudomonas","Allorhizobium-Neorhizobium-Pararhizobium-Rhizobium", "Mucilaginibacter","Luteibacter",
+                 "Stenotrophomonas","Burkholderia-Caballeronia-Paraburkholderia","Pedobacter","Flavobacterium",
+                 "Chitinophaga","Paenibacillus","Sphingomonas","Mycobacterium",
+                 "Chryseobacterium","Duganella","Variovorax")
+
+
+
+Fun_list <- list("Mucor","Trichoderma","Humicola","Fusarium","Podila",
+                 "Penicillium","Mortierella","Cunninghamella","Apiotrichum",
+                 "Cladosporium","Ascobolus","Ypsilina","Sarocladium",
+                 "Exophiala","Alternaria")
+
+
+#fun_clr_l <- fun_clr %>% pivot_longer(cols = 1:94, names_to = "SampleID", values_to = "clr")
+
+#bac_clr_l <- bac_clr %>% pivot_longer(cols = 1:95, names_to = "SampleID", values_to = "clr")
+B_clr <- B_clr  %>% as.data.frame()
+
+
+
+fun_clr_l <- left_join(F_clr, map, by = "SampleID")
+#fun_clr_l <- subset(fun_clr_l, Genus %in% c(Fun_list))
+
+
+bac_clr_l <- left_join(B_clr, map, by = "SampleID")
+#bac_clr_l <- subset(bac_clr_l, Genus %in% c(Bac_list))
+
+
+
+Fun_summary <- fun_clr_l %>% group_by(Genus, Treatment) %>% summarise(mean=mean(clr), sd=sd(clr))
+
+Bac_summary <- bac_clr_l %>% group_by(Genus, Treatment) %>% 
+  summarise(mean=mean(clr), sd=sd(clr))
+
+```
+
+
+######Occupancy
+```{r}
+
+#Calculate occupancy (number of non-zero entries per row)
+Bac_Taxa$Occupancy <- rowSums(Bac_Taxa[ , -1] > 0)
+Fun_Taxa$Occupancy <- rowSums(Fun_Taxa[ , -1]> 0)
+
+#Create a summary dataframe
+occupancy_bac <- Bac_Taxa[ , c("Genus", "Occupancy")]
+occupancy_fun <- Fun_Taxa[ , c("Genus", "Occupancy")]
+
+#Sort by occupancy in descending order
+occupancy_bac  <- occupancy_bac [order(-occupancy_bac $Occupancy), ]
+occupancy_fun <- occupancy_fun[order(-occupancy_fun$Occupancy), ]
+
+#Select the top 10
+top10_bac <- head(occupancy_bac , 10)
+top10_fun <- head(occupancy_fun, 10)
+
+#Create a list (character vector) of the top 10 genera
+top10_bac_names <- top10_bac$Genus
+top10_fun_names <- top10_fun$Genus
+
+top10_bac_data <- subset(B_RA_W, Genus %in% c(top10_bac_names))
+top10_fun_data <- subset(F_RA_W, Genus %in% c(top10_fun_names))
+```
+
+
+
+
+
+
+```{r}
+# Compute Cohen's d
+
+Bac_summary_wide <- Bac_summary %>%
+  pivot_wider(
+    names_from = Treatment,
+    values_from = c(mean, sd),
+    names_sep = "."
+  )
+
+bac_cohen <- Bac_summary_wide %>%
+  mutate(
+    pooled_sd = sqrt((sd.ambC_ambR^2 + sd.3.3C_redR^2) / 2),
+    cohens_d = (mean.3.3C_redR - mean.ambC_ambR) / pooled_sd
+  )
+
+
+
+bac_cohen <- bac_cohen  %>% mutate(Time = ifelse(TimeFrame %in% c("k"), "Early", "Late"))
+
+bac_cohen_plot <- ggplot(bac_cohen,  aes(y=reorder(Genus, cohens_d), x=cohens_d)) +
+  geom_point()+
+  geom_errorbar(aes(xmin=cohens_d-pooled_sd, xmax=cohens_d+pooled_sd), width=.2,
+            position=position_dodge(0.05)) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  facet_wrap(~ factor(Time, levels = c("Early", "Late"))) +
+  theme_bw() +
+  labs(x="cohens d", y = element_blank()) +
+  theme( strip.background = element_rect(fill = "white", colour = "black", size = 1), axis.text = element_text(size = 12)) + 
+  xlim(-5,5)
+bac_cohen_plot
+
+Fun_summary_wide <- Fun_summary %>%
+  pivot_wider(
+    names_from = Treatment,
+    values_from = c(mean, sd),
+    names_sep = "."
+  )
+
+Fun_cohen <- Fun_summary_wide %>%
+  mutate(
+    pooled_sd = sqrt((sd.ambC_ambR^2 + sd.3.3C_redR^2) / 2),
+    cohens_d = (mean.3.3C_redR - mean.ambC_ambR) / pooled_sd
+  )
+
+Fun_cohen <- Fun_cohen  %>% mutate(Time = ifelse(TimeFrame %in% c("k"), "Early", "Late"))
+
+
+
+fun_cohen_plot <- ggplot(Fun_cohen,  aes(y=reorder(Genus, cohens_d), x=cohens_d)) +
+  geom_point()+
+  geom_errorbar(aes(xmin=cohens_d-pooled_sd, xmax=cohens_d+pooled_sd), width=.2,
+            position=position_dodge(0.05)) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  facet_wrap(~ factor(Time, levels = c("Early", "Late"))) +
+  theme_bw() +
+  labs(x="cohens d", y = element_blank()) +
+  theme( strip.background = element_rect(fill = "white", colour = "black", size = 1), axis.text = element_text(size = 12)) +
+  xlim(-5,5)
+
+fun_cohen_plot 
+```
+
+#Cohens figure
+```{r}
+
+plot_grid(bac_cohen_plot + theme(legend.position="none"),
+           fun_cohen_plot+ theme(legend.position="right"),
+           align = "h", rel_widths = c(1.8, 1.8),
+           labels = c("C", "D"), label_size = 18,
+           nrow = 1
+           )
+ 
+ggsave(file="/Volumes/WD_Passport/B4W_NecroCore/Figures/Community/Cohens_CLR.svg",width = 10, height = 5, dpi = 300)
+
+
+```
+
+
+```{r}
+Bacnames <- unique(Bac_summary$Genus) %>% as.data.frame()
+Bacnames <- rename(Bacnames, Genus = ".")
+Bacnames <- left_join(Bacnames, Bacteria_raw, by = "Genus")
+Bacnames  <-  Bacnames %>% select(1,147:150)
+
+Funnames <- unique(Fun_summary$Genus) %>% as.data.frame()
+Funnames <- rename(Funnames, Genus = ".")
+
+ Fungi_raw$Genus <- sub("^g__", "",  Fungi_raw$Genus)
+Funnames <- left_join(Funnames, Fungi_raw, by = "Genus")
+
+
+
+
+Funnames$Order <- sub("^o__", "",  Funnames$Order )
+
+```
+

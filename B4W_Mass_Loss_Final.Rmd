@@ -1,0 +1,405 @@
+---
+title: "B4W_Mass_Loss"
+author: "Anahi Cantoran"
+date: "2023-12-13"
+output: html_document
+--- 
+# Clean Environment
+```{r}
+rm(list = ls()) 
+```
+
+# Load packages 
+```{r}
+library(nortest)#aic-liklihood library
+library(bbmle)
+library(tidyverse)
+library(patchwork)
+library(cowplot)
+library(ggpubr)
+
+```
+
+
+# Decay Model Fits by Sample - from Lang DeLancey (Hobbie/Kennedy Lab)
+## Formatting
+```{r}
+#Anahi got from Katie/Lang and adapted
+
+decompdata <- read.csv("/Users/anahicantoran/Desktop/B4W_NecroCore/Files/B4W_Necro_MassLoss.csv", header = T) #Cut file has only ambC_ambR x 3.3C_redR treatments
+  
+decompdata <- decompdata  %>% select(Block,Plot,set, Treatment, Day, Year, Mass_prop_lost, Mass_prop_rem)
+
+#dont need extra samples for now
+decompdata <- decompdata %>% drop_na(c("Plot", "Mass_prop_rem"))
+
+head(decompdata)
+     
+cinc <- decompdata ## cinc is the original sample data from Lang.. consider changing this
+colnames(cinc)
+
+cinc <- cinc %>% rename("MassLost" = "Mass_prop_lost") #Rename columns so that they fit with  the rest of the code
+cinc <- cinc %>% rename("MassRemain" = "Mass_prop_rem")
+
+## Getting everything in order
+cinc$MassLost <- as.numeric(cinc$MassLost)
+cinc$MassRemain <- as.numeric(cinc$MassRemain)
+cinc$Day <- as.numeric(cinc$Day)
+cinc$Plot <-as.factor(cinc$Plot)
+cinc$Block <-as.factor(cinc$Block)
+
+#make data frames for model parameters to fill in
+#LabID <- unique(cinc$LabNum) # loop through unique jars only, not each row 
+csingle.k=data.frame(set=1:length(unique(cinc$set)), kf=NA)
+cdouble.k=data.frame(set=1:length(unique(cinc$set)), kf=NA, Cf=NA, ks=NA)
+casympt.k=data.frame(set=1:length(unique(cinc$set)), kf=NA, A=NA)
+
+#make data frame for AICcvalues to fill in
+ca.aicc=data.frame(cinc$set, SdAICc=NA, DdAICc=NA, AdAICc=NA, Sweight=NA, Dweight=NA, Aweight=NA, SRSS=NA, DRSS=NA, ARSS=NA) 
+#3aicc; 3weights; 3RSS; single, double, asymptotic
+
+```
+
+## Generatting values
+```{r}
+
+for(i in 1:length(unique(cinc$set))){
+  
+  cx=subset(cinc,cinc$set==i)
+   
+   
+  # for graphing
+  t1<-seq(1,345,length.out=100000) #how long was the incubation, length out is for graphing
+  Mt<-cx$MassRemain
+  t<-cx$Year
+  
+  #Single pool 
+  #	model MassRemain=(Cf*exp(-kf*t))
+  #	params = kf, Cf
+  cmleSingle <- mle2(y~dnorm(mean=(exp(-kf*cx$Year)),sd=sqrt((sum(((exp(-kf*cx$Year)) - y)^2))/length(y))), 
+                     start=list(kf=0.001),
+                     data=list(y=cx$MassRemain), method="L-BFGS-B",
+                     lower=list(kf=0), 
+                     control=list(maxit=10e8, parscale = c(kf=0.001))) 
+  attr(cmleSingle,"df") = attr(cmleSingle ,"df")+1 
+  summary(cmleSingle)
+  csingle.k$kf[i]<-coef(cmleSingle)[1] #kf
+  
+  
+  #Daily resp 2pool constrained (Yuste et al. 2008);
+  #	model MassRemain=kf*(Cf*exp(-kf*t))+ks*((totalC-Cf)*exp(-ks*t))
+  #	params = kf, ks, Cf
+  cmleDouble <- mle2(y~dnorm(mean=(Cf*exp(-kf*cx$Year))+((1-Cf)*exp(-ks*cx$Year)),sd=sqrt((sum(((Cf*exp(-kf*cx$Year))+ ((1-Cf)*exp(-ks*cx$Year)) - y)^2))/length(y))),
+                     start=list(kf=0.01, Cf=0.01, ks=0.0001),
+                     data=list(y=cx$MassRemain), method="L-BFGS-B",
+                     lower=list(kf=0, Cf=0, ks=0), 
+                     control=list(maxit=10e8, parscale = c(kf=0.01, Cf=0.001, ks=0.00001)))
+  attr(cmleDouble, "df") = attr(cmleDouble, "df")+1
+  summary(cmleDouble)
+  cdouble.k$kf[i]<-coef(cmleDouble)[1] #kf
+  cdouble.k$Cf[i]<-coef(cmleDouble)[2] #Cf
+  cdouble.k$ks[i]<-coef(cmleDouble)[3] #ks
+  
+  
+  #Daily resp Asymptotic Model
+  # model MassRemain=A+(1-A)*exp(-kf*t)
+  cmleAsympt <- mle2(y~dnorm(mean = A+(1-A)*exp(-kf*cx$Year), sd=sqrt((sum((A+(1-A)*exp(-kf*cx$Year) - y)^2))/length(y))),			
+                     start=list(kf=0.001, A=0.1),
+                     data=list(y=cx$MassRemain), method="L-BFGS-B",
+                     lower=list(kf=0, A=0),
+                     control=list(maxit=10e8, parscale = c(k=0.0001, A=.01)))
+  attr(cmleAsympt, "df") = attr(cmleAsympt, "df")+1
+  summary(cmleAsympt)
+  casympt.k$kf[i]<-coef(cmleAsympt)[1] #kf
+  casympt.k$A[i]<-coef(cmleAsympt)[2] #A
+  
+  #Compare models
+  #Extract AICC values
+  cxx<-AICctab(cmleSingle,cmleDouble,cmleAsympt, nobs=nrow(cx), sort=FALSE, delta=TRUE, weights=TRUE)
+  cxx
+  ca.aicc$SdAICc[i]=cxx$dAICc[1] #if dAICc=0 then it's the better fit
+  ca.aicc$DdAICc[i]=cxx$dAICc[2]
+  ca.aicc$AdAICc[i]=cxx$dAICc[3]
+  ca.aicc$Sweight[i]=cxx$weight[1] #higher weight = better model
+  ca.aicc$Dweight[i]=cxx$weight[2]
+  ca.aicc$Aweight[i]=cxx$weight[3]
+  ca.aicc$SRSS[i]=sum(residuals(cmleSingle)^2)
+  ca.aicc$DRSS[i]=sum(residuals(cmleDouble)^2)
+  ca.aicc$ARSS[i]=sum(residuals(cmleAsympt)^2)
+  ca.aicc[i,]
+  
+  quartz(title="ModelFit", type='pdf', file=paste0("/Users/anahicantoran/Desktop/B4W_NecroCore/FitbySampledata/","DecayModelLabNum", cx$set, ".pdf"))
+  plot(cx$Year,cx$MassRemain, 
+       main=c(cx$set[1],cx$species[1],cx$fert_treat[1],cx$bio_treat[1]),
+       xlab="Year",
+       ylab="Proportion Mass Remaining")
+  
+  lines(cx$Year, (exp(-csingle.k$kf[i]*cx$Year)), col="black")
+  
+  lines(cx$Year, (cdouble.k$Cf[i]*exp(-cdouble.k$kf[i]*cx$Year))+ ((1-cdouble.k$Cf[i])*exp(-cdouble.k$ks[i]*cx$Year)), col="red")
+  
+  lines(cx$Year, (casympt.k$A[i]+(1-casympt.k$A[i])*exp(-casympt.k$kf[i]*cx$Year)), col="green")
+  
+  dev.off()
+  
+  i
+}
+```
+
+
+## Csv outputs
+```{r}
+write.csv(csingle.k, file = paste0("/Users/anahicantoran/Desktop/B4W_NecroCore/FitbySampledata/Output2/", "SinglePoolModel.csv"), append=FALSE, row.names=FALSE, col.names=TRUE)
+
+write.csv(cdouble.k,file = paste0("/Users/anahicantoran/Desktop/B4W_NecroCore/FitbySampledata/Output2/", "DoublePoolModel.csv"), append=FALSE, row.names=FALSE, col.names=TRUE)
+
+write.csv(casympt.k,file = paste0("/Users/anahicantoran/Desktop/B4W_NecroCore/FitbySampledata/Output2/", "AsymptoticModel.csv"), append=FALSE, row.names=FALSE, col.names=TRUE)
+
+write.csv(ca.aicc,file = paste0("/Users/anahicantoran/Desktop/B4W_NecroCore/FitbySampledata/Output2/", "AIC.csv"), append=FALSE, row.names=FALSE, col.names=TRUE)
+
+```
+
+# Evaluating AIC values
+### From the ca.aicc output file, we can compare Sd, Dd, and Ad AIC values from the generated models. Here we see that it is the asympotic model (Ad) that has the lowest AIC values across all sets (or "samples"). As such, the asympotic model can be assigned as the best model fit for the necromass mass loss. The following mass loss analyses will therefore be focused on the asymptotic model.
+
+## ANOVAS and plotting A's and K's for asymptotic model
+```{r}
+AsMod <- read.csv("/Volumes/WD_Passport/B4W_NecroCore/FitbySampledata/Output2/AsymptoticModel.csv", header = T)
+
+decompdata <- read.csv("/Volumes/WD_Passport/B4W_NecroCore/Files/B4W_Necro_MassLoss.csv", header = T) #Cut file has only ambC_ambR x 3.3C_redR treatments
+
+decompdata <- decompdata  %>% select(Block,Plot,set, Treatment, Day, Year, Mass_prop_lost, Mass_prop_rem)
+
+#dont need extra samples here either
+#decompdata <- decompdata %>% drop_na(c("Plot", "Mass_prop_rem"))
+
+cinc <- decompdata
+cinc <- cinc %>% rename("MassLost" = "Mass_prop_lost")
+cinc <- cinc %>% rename("MassRemain" = "Mass_prop_rem")
+cinc_trt <- cinc %>% select(set, Treatment, Block) ## Need to open from "Formatting"
+cinc_trt <- cinc_trt %>% distinct()
+
+AsMod <- full_join(AsMod, cinc_trt, by = "set")
+
+AsMod$Treatment <- factor(AsMod$Treatment, levels = c("ambC_ambR", "3.3C_redR"))
+
+#Pivot longer , 
+AsMod_long <- pivot_longer(AsMod, cols = 2:3, names_to = "case", values_to = "value")
+
+
+#Plotting k values
+k_plot <- ggplot(AsMod, aes(x=Treatment, y = kf, fill= Treatment)) +
+ stat_boxplot(geom = "errorbar", width=0.2, position = position_dodge(1)) +
+  geom_boxplot(position = position_dodge(1), outlier.shape = NA) + 
+  geom_point(aes(fill = Treatment, group = Treatment), color="black", alpha  =0.4, size=2, 
+                 position = position_jitterdodge(jitter.width = .1, dodge.width = 1)) +
+  scale_fill_manual(values = c("ambC_ambR"= '#51A0C0', "3.3C_redR"='#AE0037' )) +
+  theme_bw() + 
+  theme(legend.position = "none", axis.text = element_text(size=14),
+        axis.title = element_text(size = 18)) +
+  labs(x = element_blank(), y = "k") +
+  scale_x_discrete(labels=c("ambC_ambR" = "Ambient", "3.3C_redR" = "Altered"))
+k_plot
+
+
+#With block as a random effect
+summary(aov(kf ~ Treatment + (1|Block), data = AsMod))
+
+summary(aov(kf ~ Treatment + Error(Block/set), data = AsMod))
+
+lme_model <- lme(
+  kf ~ Treatment,
+  random = ~1 | Block/set,
+  data = AsMod
+)
+
+summary(lme_model)
+summary(lme_model)$tTable
+
+#Plotting A values
+A_plot <- ggplot(AsMod, aes(x=Treatment, y = A, fill= Treatment)) +
+ stat_boxplot(geom = "errorbar", width=0.2, position = position_dodge(1)) +
+  geom_boxplot(position = position_dodge(1), outlier.shape = NA) + 
+  geom_point(aes(fill = Treatment, group = Treatment), color="black", alpha  =0.4, size=2, 
+                 position = position_jitterdodge(jitter.width = .1, dodge.width = 1)) +
+  scale_fill_manual(values = c( "ambC_ambR"= '#51A0C0',"3.3C_redR"='#AE0037')) +
+  theme_bw() +
+  theme(legend.position = "none", axis.text = element_text(size=14),
+        axis.title = element_text(size = 18)) +
+  labs(x = element_blank(), y = "A") +
+  scale_x_discrete(labels=c("ambC_ambR" = "Ambient", "3.3C_redR" = "Altered"))
+
+A_plot
+
+#With block as a random effect
+summary(aov(A ~ Treatment + (1|Block), data = AsMod))
+
+summary(aov(A ~ Treatment + Error(Block/set), data = AsMod))
+
+
+lme_model <- lme(
+  A ~ Treatment,
+  random = ~1 | Block/set,
+  data = AsMod
+)
+
+summary(lme_model)
+summary(lme_model)$tTable
+
+
+#With block as fixed effect
+summary(aov(A ~ Treatment + Block, data = AsMod))
+
+```
+
+
+## Combining kf and A plots together 
+```{r fig.height=4, fig.width=6} 
+library(cowplot)
+library(patchwork)
+library(ggpubr)
+
+List <- list(k_plot, A_plot)
+
+## Vertical form
+plot <- wrap_plots(List,ncol = 2,nrow = 1) 
+plot <- patchwork::patchworkGrob(plot)
+
+k_A_plots <- as_ggplot(plot) +                                # transform to a ggplot
+  draw_plot_label(label = c("Trt: ***", "Trt: ns", "B", "C"), size = 12, fontface = "plain",
+                  y = c(0.96, 0.96, 0.99, 0.99), x = c(0.06,0.56, 0.02, 0.5)) # Add labels
+k_A_plots
+
+ggsave(file="/Volumes/WD Passport/B4W_NecroCore/Figures/MassLoss/k_A_values.svg",width = 8, height = 4, dpi = 300)
+
+```
+
+
+# Asymptotic model on necromass mass loss for treated and control plots 
+```{r}
+
+#Asymptotic model function
+# mt.mo = s + (1-s)*e^-kt 
+# mt.mo = exp(-k*year)
+# s represents a stable fraction with a decomposition rate of zero 
+# (1 − s) is the initial decomposable mass that decomposes at a rate of ka
+library(minpack.lm)
+
+Meta <- read.csv("/Volumes/WD_Passport/B4W_NecroCore/Files/B4W_NecroCore_Map.csv", header = T)
+
+
+#dont need extra samples 
+Meta_clean <- Meta %>% drop_na(c("Plot", "Mass_prop_rem"))
+
+##Select only for treatment and ambient/control
+Meta_ctrl_trt <- filter(Meta_clean, Treatment %in%  c("3.3C_redR", "ambC_ambR"))
+
+### Estimate the a and K coefficients for ambientC x ambientR
+
+Meta_amb_amb <- filter(Meta_ctrl_trt, Treatment %in% c("ambC_ambR"))
+                           
+guess.hb.aa <- nlsLM(Mass_prop_rem ~ s + (1-s)*exp(-ka*Year), start=list(s=1,ka=1), data=Meta_amb_amb) 
+coef(guess.hb.aa)
+
+asymp.hb.aa = nls(Mass_prop_rem~s + (1-s)*exp(-ka*Year), start=list(s=0.2,ka=45), data=Meta_amb_amb) 
+summary(asymp.hb.aa)
+
+print("Correlation beteween observed and predicted mass remaining for amb x amb")
+cor(Meta_amb_amb$Mass_prop_rem,predict(asymp.hb.aa))
+
+### For treated 3.3C x redR
+Meta_3.3C_redR <- filter(Meta_ctrl_trt, Treatment %in% c("3.3C_redR"))
+                 
+guess.hb.trt <- nlsLM(Mass_prop_rem~ s + (1-s)*exp(-ka*Year), start=list(s=1,ka=1), data=Meta_3.3C_redR) 
+coef(guess.hb.trt)
+
+asymp.hb.trt = nls(Mass_prop_rem~s + (1-s)*exp(-ka*Year), start=list(s=0.2,ka=45), data=Meta_3.3C_redR) 
+summary(asymp.hb.trt)
+
+print("Correlation beteween observed and predicted mass remaining for amb x amb")
+cor(Meta_3.3C_redR$Mass_prop_rem,predict(asymp.hb.trt))
+
+
+##ggplot for trt and control treatmens in one 
+asmym.hb.plot <- ggplot(Meta_ctrl_trt, aes(Day, Mass_prop_rem, colour = Treatment)) + 
+  geom_point(alpha = 0.8, size=3, aes(colour = Treatment)) + 
+  geom_smooth(method = "nls", # we will need to convert the estimate for k1 & k2into days 
+              formula = y ~ s + (1-s)*exp(-ka*x),
+              method.args = list(start=c(s=0.2,ka=0.1)), 
+              se = FALSE, size=0.75, aes(color=Treatment)) +
+  scale_colour_manual(breaks = c( "3.3C_redR", "ambC_ambR"),
+                      values=c('#AE0037', '#51A0C0' )) +
+  scale_y_continuous(labels = function(x) paste0(x*100, "%")) +
+  xlab("Day")+
+  ylab("Necromass remaining") +
+  theme_bw() + 
+  theme(legend.position = c(.70, .85), legend.background = element_blank(), axis.text = element_text(size = 14), axis.title = element_text(size=18),legend.title = element_text(size=14)) #+
+  #discrete_scale(labels = c("ambC_ambR"= "Ambient", "3.3C_redR" = "Altered"))
+
+asmym.hb.plot 
+
+
+#ggsave(file="/Volumes/WD Passport/B4W_NecroCore/Figures/Asympotic_model.svg", width = 8, height = 5, dpi = 300)
+##Added annotations via inkscape
+
+```
+
+## Anova for B4W treatments * time 
+```{r}
+#* (1| Block_num)
+
+Mod <- lm(Mass_prop_rem ~ Treatment * Day * (1| Block_num) , data=Meta_ctrl_trt)
+
+ANOVA_Mod <- aov(Mod)
+summary(ANOVA_Mod)
+
+
+tukey.t.doub <- TukeyHSD(ANOVA_Mod, which = "Treatment")
+tukey.t.doub
+#mass rem ~ time * treatment + (1 | bloc)
+#if time is sig, post hoc tukey
+
+library(agricolae)
+tukey.test2 <- HSD.test(ANOVA_Mod, trt = c('Treatment', 'Day'))
+tukey.test2
+summ
+```
+
+
+
+```{r}
+incubation_2 <- read.csv("/Volumes/WD_Passport/B4W_NecroCore/Files/B4W_MassLosswBiologs.csv", header = T)
+
+##Select only for treatment and ambient/control
+incubation_2 <- filter(incubation_2, Deployment %in%  c("August"))
+
+incubation_2$Day<- paste(incubation_2$Day, "Day ")
+
+incubation_2$Day <- factor(incubation_2$Day, levels = c("7 Day ", "49 Day "))
+
+incubation_2<- incubation_2%>%
+  mutate(status = case_when(
+    Treatment %in% c("3.3C_redR") ~ "Altered",
+    Treatment %in% c("ambC_ambR")  ~ "Ambient"
+  ))
+
+ggplot(incubation_2, aes(y= Mass_remaining, x = status, fill =status)) +
+  geom_boxplot() +
+  geom_point() +
+  facet_grid(~Day)+
+   scale_fill_manual(values = c("Altered"='#AE0037', "Ambient"= '#51A0C0'), name = "Treatment") +
+  labs(y= "Necromass remaining", x = element_blank()) +
+  theme_bw() +
+  theme(legend.position='none', 
+        strip.text = element_text(face = "bold",size =10),
+        strip.background = element_rect(fill = "white", colour = "black", 
+                                        size = 1)) +
+  ylim(0.2,1)
+
+
+ggsave(file="/Volumes/WD_Passport/B4W_NecroCore/Figures/Massloss_incubation2.svg", width = 6, height = 4, dpi = 300)
+##Added annotations via inkscape
+
+```
+
+

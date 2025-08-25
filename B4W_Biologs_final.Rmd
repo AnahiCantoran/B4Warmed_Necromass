@@ -1,0 +1,530 @@
+---
+title: "B4W_Biologs"
+author: "Anahi Cantoran"
+date: "2023-12-09"
+output: html_document
+---
+
+
+# Clean out environment
+```{r}
+rm(list = ls()) 
+```
+
+# Load packages
+```{r}
+library(tidyverse)
+#library(SciViews) #for ln function
+```
+
+
+# Load Biolog data
+```{r}
+Biologs_Day7 <- read.csv("/Volumes/WD_Passport/B4W_NecroCore/Files/B4W_Biologs_Day7.csv", header = T)
+Biologs_Day49 <- read.csv("/Volumes/WD_Passport/B4W_NecroCore/Files/B4W_Biologs_Day49.csv", header = T)
+```
+ 
+
+# Calculating average well color development AWCD
+$$
+AWCD = \sum {ODi}/N
+$$ 
+
+ where ODi was OD of each substrate corrected for the blank and N was the number of substrates.
+
+# FIRST: Some housekeeping - normalizing, averaging, and subsetting data + rbind dfs
+```{r}
+#Day7 Incubation
+Biologs_Day7 <- subset(Biologs_Day7, Time %in% "120" ) # Subset last time point
+Biologs_Day7 <- Biologs_Day7 %>% dplyr::select(-FW_slurry, -DW_aliq, -DW_Added, -FW_aliq, -Ratio_aliq, - Column)
+Biologs_Day7 <- Biologs_Day7 %>% mutate(Day = "Day 7") # Add column with the incubation time 
+Biologs_Day7 <- Biologs_Day7 %>% group_by(Treatment, Rep, Treatment_broad) %>% 
+  mutate(Value = Absorbance_Raw - Absorbance_Raw[Category == "Water"]) # mutate a new column removing water blanks
+Biologs_Day7 <- Biologs_Day7 %>% group_by(Treatment, Substrate) %>% 
+  mutate(Avg = mean(Value)) #this fills out whole data frame, so there are replicates with the same values
+#Keep only distinct columns, disregarding replicates since they have the same average absorbance
+Biologs_Day7_avg <- Biologs_Day7 %>% distinct(Treatment, Substrate, Class, Category, Avg, Day, Treatment_broad) 
+
+#Day49 Incubation
+Biologs_Day49 <- subset(Biologs_Day49, Time %in% "120" ) 
+Biologs_Day49 <- Biologs_Day49 %>% dplyr::select(-FW_slurry, -DW_aliq, -DW_Added, -FW_aliq, -Ratio_aliq, - Column)
+Biologs_Day49 <- Biologs_Day49 %>% mutate(Day = "Day 49") 
+Biologs_Day49 <- Biologs_Day49 %>% group_by(Treatment, Rep, Treatment_broad) %>% 
+  mutate(Value = Absorbance_Raw - Absorbance_Raw[Category == "Water"]) 
+Biologs_Day49 <- Biologs_Day49 %>% group_by(Treatment, Substrate) %>% 
+  mutate(Avg = mean(Value)) 
+Biologs_Day49_avg <- Biologs_Day49 %>% distinct(Treatment, Substrate, Class, Category, Avg, Day, Treatment_broad) 
+
+Biologs_avg <- rbind(Biologs_Day7_avg,Biologs_Day49_avg)
+
+#Assess normality
+library(ggpubr)
+ggqqplot(Biologs_avg$Avg)
+
+```
+ 
+
+# Calculate AWCD
+# Divide the sum of the well reps (avg) by the number of substrates (N = 31)
+```{r}
+Biologs_avg <- Biologs_avg %>% group_by(Treatment, Day) %>% mutate(AWCD = sum(Avg)/31) #Create AWCD column
+
+#To help with some ease of moving variables around, make Day 7 and 49 as a factors and reorder 
+Biologs_avg$Day <- factor(Biologs_avg$Day, #Converts to factor 
+                  levels = c("Day 7", "Day 49")) # Reorder
+
+# Assuming your dataframe is named df and the column is named 'day'
+Biologs_avg$TimeFrame <- ifelse(Biologs_avg$Day == "Day 7", "Early", ifelse(Biologs_avg$Day == "Day 49", "Late", NA))
+
+
+Biologs_AWCD <- Biologs_avg %>% distinct(Treatment, Day, TimeFrame, Treatment_broad, AWCD) #Pull distinct values to plot
+
+
+```
+
+# Anova of AWCD and Post hoc Tukey 
+```{r}
+#ANOVA
+AWCD.lm <- lm(AWCD ~ Treatment_broad * Day , data=Biologs_AWCD)
+ANOVA_AWCD <- aov(AWCD.lm)
+summary(ANOVA_AWCD)
+
+#Post Hoc tukey tests
+library(agricolae)
+TukeyHSD(ANOVA_AWCD)
+Tukey <- TukeyHSD(ANOVA_AWCD)
+plot(Tukey , las=1 , col="brown") #Visualize 
+
+tukey2 <- HSD.test(ANOVA_AWCD, trt = c('Treatment_broad', "Day"))
+tukey2
+
+```
+
+# Calculate means, sd, and plot
+```{r}
+library(multcompView)
+cld <- multcompLetters4(ANOVA_AWCD, Tukey)
+
+df <- Biologs_AWCD %>% group_by(Treatment_broad,TimeFrame) %>% summarise(mean = mean(AWCD),sd= sd(AWCD)/sqrt(length(AWCD)))
+
+cld2 <- data.frame(letters=cld$'Treatment_broad:Day'$Letters)
+df$cld <- cld2$letters
+print(df)
+
+AWCD <- ggplot(df, aes(x= Treatment_broad, y = mean)) +
+  geom_bar(stat = "identity", aes(fill = Treatment_broad), show.legend = F) +
+  geom_errorbar(aes(ymin=mean-sd, ymax=mean+sd), width= 0.2)+
+  geom_text(aes(label = cld,y = mean + sd), vjust=-0.5) +
+  labs( x = element_blank(), y = "AWCD") +
+  scale_fill_manual(values = c("3.3C_redR"='#AE0037', "ambC_ambR"= '#51A0C0')) +
+  facet_wrap(~TimeFrame) +
+  theme_bw() + 
+  theme(legend.position='bottom', strip.text = element_text(face = "bold",size =12),
+    strip.background = element_rect(fill = "white", colour = "black", size = 1), 
+    axis.text = element_text(size=14), axis.title = element_text(size = 18)) +
+      guides(fill = guide_legend(override.aes = list(shape = NA) ) )+
+  ylim(0,2)  + 
+  scale_x_discrete(labels=c("ambC_ambR" = "Ambient", "3.3C_redR" = "Altered"))
+
+
+AWCD
+#ggsave(file="AWCD_biolog_bar.png", width = 4, height = 4, dpi = 300)
+#ggsave(file="AWCD_biolog_bar.svg", width = 4, height = 4, dpi = 300)
+
+```
+
+# Calculating AWCD by Substrate --- SAWCD
+```{r}
+#Amines
+Amines <- Biologs_avg %>% filter(Category %in% "Amines")
+Amines <- Amines %>% group_by(Treatment, Day) %>%  mutate(SAWCD = sum(Avg)/2)
+
+#Amino Acid
+Amino <- Biologs_avg %>% filter(Category %in% "Amino Acid")
+Amino <- Amino  %>% group_by(Treatment,Day) %>%  mutate(SAWCD = sum(Avg)/6)
+
+#Carbohydrates
+Carbohydrate <- Biologs_avg  %>% filter( Category %in% "Carbohydrate")
+Carbohydrate <- Carbohydrate %>% group_by(Treatment, Day) %>% mutate(SAWCD = sum(Avg)/10)
+
+#Carboxylic Acid
+CarboxylicAcid <- Biologs_avg  %>% filter( Category %in% "Carboxylic Acid")
+CarboxylicAcid <- CarboxylicAcid %>% group_by(Treatment, Day) %>% mutate(SAWCD = sum(Avg)/7)
+
+#Polymer
+Polymer <- Biologs_avg %>% filter( Category %in% "Polymer")
+Polymer <- Polymer %>% group_by(Treatment, Day) %>% mutate(SAWCD = sum(Avg)/4)
+
+#Carbohydrate
+Phenol <- Biologs_avg   %>% filter( Category %in% "Phenol")
+Phenol <- Phenol  %>% group_by(Treatment, Day) %>% mutate(SAWCD = sum(Avg)/2)
+
+# Join all the categories together into one df
+Biologs_Categories <- rbind(Amines, Amino, Carbohydrate, CarboxylicAcid, Polymer, Phenol)
+
+# Select for distinct
+Biologs_SAWCD <- Biologs_Categories %>%  distinct(Treatment, Category, SAWCD, TimeFrame, Treatment_broad) 
+
+## Making a block column 
+# Split the strings by "_"
+split_strings <- strsplit(as.character(Biologs_SAWCD$Treatment), "_")
+
+# Extract the first word from each split
+first_words <- sapply(split_strings, "[[", 1)
+
+# Create a new column with the first words
+Biologs_SAWCD$Block <- first_words
+
+
+
+
+```
+
+# ANOVAS and post hoc for SAWCD
+```{r}
+library(car)
+
+# List of categories
+categories <- unique(Biologs_SAWCD$Category)
+
+Biologs_SAWCD$Block <- as.numeric(Biologs_SAWCD$Block)
+# Make a function to fit an ANOVA model for each category
+fit_anova <- function(category, data) {
+  # Filter data for the current category
+  category_data <- Biologs_SAWCD %>% filter(Category == category)
+  # Fit a two-way ANOVA model for the current category
+  anova_model <- aov(SAWCD ~ Treatment_broad * Day + (1| Block), data = category_data)
+  # Print ANOVA summary for the current category
+  cat("Category:", category, "\n")
+  print(summary(anova_model))
+  
+  # Return ANOVA model
+  return(anova_model)
+}
+
+# Fit ANOVA model for each category
+anova_models <- lapply(categories, fit_anova)
+
+
+
+
+# Function to perform Tukey post hoc test for each ANOVA model
+perform_tukey <- function(anova_model, category) {
+  # Perform Tukey post hoc test
+  tukey_results <- TukeyHSD(anova_model)
+  # Print Tukey post hoc test results
+  cat("Tukey post hoc test results for Category:", category, "\n")
+  print(tukey_results)
+}
+
+# Perform Tukey post hoc test for each ANOVA model
+
+for (i in seq_along(anova_models)) {
+  perform_tukey(anova_models[[i]], categories[i])
+}
+
+
+
+# Create an empty list to store Tukey results
+tukey_results_list <- list()
+
+# Function to perform Tukey post hoc test for each ANOVA model and store the results
+perform_tukey_and_store <- function(anova_model, category) {
+  # Perform Tukey post hoc test
+  tukey_results <- TukeyHSD(anova_model)
+  
+  # Store the results in a list with a meaningful name
+  result_name <- paste("Tukey_results_", category, sep = "")
+  tukey_results_list[[result_name]] <- tukey_results
+  
+  # Return the Tukey results
+  return(tukey_results)
+}
+
+# Perform Tukey post hoc test for each ANOVA model and store the results in the list
+for (i in seq_along(anova_models)) {
+  tukey_results_list[[i]] <- perform_tukey_and_store(anova_models[[i]], categories[i])
+}
+
+
+
+```
+
+
+
+
+## Plot SAWCD
+
+```{r}
+cp2 <- multcompLetters4(ANOVA_AWCD, Tukey)
+
+df <- Biologs_AWCD %>% group_by(Treatment_broad,TimeFrame) %>% summarise(mean = mean(AWCD),sd= sd(AWCD)/sqrt(length(AWCD)))
+
+cld2 <- data.frame(letters=cld$'Treatment_broad:Day'$Letters)
+df$cld <- cld2$letters
+print(df)
+
+```
+
+```{r}
+#Calculate means for plots and SE
+df_SAWCD <- Biologs_SAWCD %>% group_by(Treatment_broad, TimeFrame, Category) %>% summarise(mean = mean(SAWCD),sd= sd(SAWCD)/sqrt(length(SAWCD)))
+
+
+df_SAWCD$Treatment_broad<- factor(df_SAWCD$Treatment_broad, #Converts to factor 
+                  levels = c("ambC_ambR", "3.3C_redR")) # Reorder
+
+
+ggplot(df_SAWCD, aes(y= mean, x = Treatment_broad, fill = Treatment_broad)) +
+  geom_bar(stat = "identity", show.legend = T, position="dodge") +
+  geom_errorbar(aes(ymin=mean-sd, ymax=mean+sd), width= 0.2, position=position_dodge(.9)) +
+  labs(y="AWCD", x = element_blank()) +
+  scale_fill_manual(values = c("3.3C_redR"='#AE0037', "ambC_ambR"= '#51A0C0'), name = "Treatment") +
+  facet_grid(TimeFrame ~ Category) +
+  theme_bw() + 
+  theme(legend.position='none', strip.text = element_text(size =10),
+    strip.background = element_rect(fill = "white", colour = "black", size = 1), axis.title = element_text(size =12), axis.text = element_text(size = 10), axis.text.x = element_text(angle = -25)) +
+      guides(fill = guide_legend(override.aes = list(shape = NA)) ) +
+   scale_x_discrete(labels=c("ambC_ambR" = "Ambient", "3.3C_redR" = "Altered")) +
+  ylim(0,2.5)
+
+
+
+ggsave(file="/Volumes/WD Passport/B4W_NecroCore/Figures/Biolog/Biologs_SAWCD.svg",width=8, height=5, dpi=300)
+```
+
+
+
+## Another option: 3-way anova to test differences across substrates as well, not only trt and day
+```{r}
+t <- lm(SAWCD ~ Category*Treatment_broad*Day , data = Biologs_SAWCD)
+Anova_t <- aov(t)
+summary(Anova_t)
+
+tukey.t <- HSD.test(Anova_t, trt = c('Treatment_broad', "Day", "Category"))
+tukey.t
+
+plot(tukey.t)
+```
+
+
+
+ 
+# AWCD by Class --- CAWCD
+ ## 3 Classes defined: Simple C, Complex C, and N rich for each of the substrates
+```{r}
+# Simple C 
+SimpleC <- Biologs_avg %>% filter(Class %in% "Simple C")
+SimpleC <- SimpleC %>% group_by(Treatment, Day) %>% mutate(CAWCD = sum(Avg)/8)
+SimpleC <- SimpleC %>% distinct(Treatment, Class, Day, Treatment_broad, CAWCD)
+
+# Complex C 
+ComplexC <- Biologs_avg %>% filter(Class %in% "Complex C")
+ComplexC <- ComplexC %>% group_by(Treatment, Day) %>% mutate(CAWCD = sum(Avg)/17)
+ComplexC <- ComplexC %>% distinct(Treatment,Class ,Day, Treatment_broad, CAWCD)
+
+# N rich 
+Nrich <- Biologs_avg %>% filter( Class %in% "N rich") 
+Nrich <- Nrich %>% group_by(Treatment,Day) %>%  mutate(CAWCD = sum(Avg)/10)
+Nrich <- Nrich %>% distinct(Treatment,Class ,Day, Treatment_broad, CAWCD)
+
+# Join multiple data.frames
+Biologs_CAWCD <- rbind(SimpleC, ComplexC, Nrich)
+```
+
+## Anovas for Biolog Substrate classes 
+```{r}
+#Simple C
+SimpleC.lm <- lm(CAWCD ~ Treatment_broad * Day , data=SimpleC)
+ANOVA_SS <- aov(SimpleC.lm)
+summary(ANOVA_SS)
+Tukey_SS <- TukeyHSD(ANOVA_SS)
+
+#Complex C
+ComplexC.lm <- lm(CAWCD ~ Treatment_broad * Day , data=ComplexC)
+ANOVA_CS <- aov(ComplexC.lm)
+summary(ANOVA_CS)
+Tukey_CS <- TukeyHSD(ANOVA_CS)
+#N rich 
+Nrich.lm <- lm(CAWCD ~ Treatment_broad * Day , data=Nrich)
+ANOVA_NR <- aov(Nrich.lm)
+summary(ANOVA_NR)
+Tukey_NR <- TukeyHSD(ANOVA_NR)
+
+```
+```{r}
+cld <- multcompLetters4(ANOVA_SS, Tukey_SS)
+
+df <- SimpleC %>% group_by(Treatment_broad,Day) %>% summarise(mean = mean(CAWCD),sd= sd(CAWCD)/sqrt(length(CAWCD)))
+
+cld2 <- data.frame(letters=cld$'Treatment_broad:Day'$Letters)
+df$cld <- cld2$letters
+print(df)
+
+SC <- ggplot(df, aes(x= Treatment_broad, y = mean)) +
+  geom_bar(stat = "identity", aes(fill = Treatment_broad), show.legend = F) +
+  geom_errorbar(aes(ymin=mean-sd, ymax=mean+sd), width= 0.2)+
+  geom_text(aes(label = cld,y = mean + sd), vjust=-0.5) +
+  labs( x = element_blank(), title = "Simple C") +
+  scale_fill_manual(values = c("3.3C_redR"='#876946', "amb_amb "= '#8A9677')) +
+  facet_wrap(~Day) +
+  theme_bw() + 
+  theme(legend.position='bottom', strip.text = element_text(face = "bold"),
+    strip.background = element_rect(fill = "white", colour = "black", size = 1)) +
+      guides(fill = guide_legend(override.aes = list(shape = NA) ) )+
+  ylim(0,2) +
+  ylab(bquote(A["590"])) 
+SC
+
+cld <- multcompLetters4(ANOVA_CS, Tukey_CS)
+
+df <- ComplexC %>% group_by(Treatment_broad,Day) %>% summarise(mean = mean(CAWCD),sd= sd(CAWCD)/sqrt(length(CAWCD)))
+
+cld2 <- data.frame(letters=cld$'Treatment_broad:Day'$Letters)
+df$cld <- cld2$letters
+print(df)
+
+CC <- ggplot(df, aes(x= Treatment_broad, y = mean)) +
+  geom_bar(stat = "identity", aes(fill = Treatment_broad), show.legend = F) +
+  geom_errorbar(aes(ymin=mean-sd, ymax=mean+sd), width= 0.2)+
+  geom_text(aes(label = cld,y = mean + sd), vjust=-0.5) +
+  labs( x = element_blank(), title = "Complex C") +
+  scale_fill_manual(values = c("3.3C_redR"='#876946', "amb_amb "= '#8A9677')) +
+  facet_wrap(~Day) +
+  theme_bw() + 
+  theme(legend.position='bottom', strip.text = element_text(face = "bold"),
+    strip.background = element_rect(fill = "white", colour = "black", size = 1)) +
+      guides(fill = guide_legend(override.aes = list(shape = NA) ) )+
+  ylim(0,2)+
+  ylab(bquote(A["590"])) 
+CC
+
+
+cld <- multcompLetters4(ANOVA_NR, Tukey_NR)
+
+df <- Nrich %>% group_by(Treatment_broad,Day) %>% summarise(mean = mean(CAWCD),sd= sd(CAWCD)/sqrt(length(CAWCD)))
+
+cld2 <- data.frame(letters=cld$'Treatment_broad:Day'$Letters)
+df$cld <- cld2$letters
+print(df)
+
+NR <- ggplot(df, aes(x= Treatment_broad, y = mean)) +
+  geom_bar(stat = "identity", aes(fill = Treatment_broad), show.legend = F) +
+  geom_errorbar(aes(ymin=mean-sd, ymax=mean+sd), width= 0.2)+
+  geom_text(aes(label = cld,y = mean + sd), vjust=-0.5) +
+  labs( x = element_blank(), title = "N rich") +
+  scale_fill_manual(values = c("3.3C_redR"='#876946', "amb_amb "= '#8A9677')) +
+  facet_wrap(~Day) +
+  theme_bw() + 
+  theme(legend.position='bottom', strip.text = element_text(face = "bold"),
+    strip.background = element_rect(fill = "white", colour = "black", size = 1)) +
+      guides(fill = guide_legend(override.aes = list(shape = NA) )) +
+  ylim(0,2)+
+  ylab(bquote(A["590"])) 
+
+NR 
+```
+
+ 
+## Plot CAWCD
+```{r}
+ggplot(Biologs_CAWCD, aes(y= CAWCD, x = Day, fill = Treatment_broad)) +
+ stat_boxplot(geom = "errorbar", width=0.2, position = position_dodge(1)) +
+  geom_boxplot(position = position_dodge(1), outlier.shape = NA) + 
+  geom_point(aes(fill = Treatment_broad, group = Treatment_broad), color="black", alpha  =0.4, size=1, 
+                 position = position_jitterdodge(jitter.width = .1, dodge.width = 1)) +
+  facet_wrap(~factor(Class, levels=c('Simple C','Complex C','N rich')), nrow = 1) +
+  labs(x = element_blank()) +
+  scale_x_discrete(limits = c("Day 7", "Day 49")) +
+  scale_fill_manual(values = c("3.3C_redR"='#876946', "amb_amb "= '#8A9677'), name = "Treatment" ) +
+  theme_bw() +
+  theme(legend.position='bottom', strip.text = element_text(face = "bold"),
+    strip.background = element_rect(fill = "white", colour = "black", size = 1)) +
+      guides(fill = guide_legend(override.aes = list(shape = NA) ) )
+
+```
+
+
+```{r}
+SC <- ggplot(SimpleC, aes(y= CAWCD, x = Day, fill = Treatment_broad)) +
+ stat_boxplot(geom = "errorbar", width=0.2, position = position_dodge(1)) +
+  geom_boxplot(position = position_dodge(1), outlier.shape = NA) + 
+  geom_point(aes(fill = Treatment_broad, group = Treatment_broad), color="black", alpha  =0.4, size=1, 
+                 position = position_jitterdodge(jitter.width = .1, dodge.width = 1)) +
+  labs(x=element_blank()) +
+  scale_x_discrete(limits = c("Day 7", "Day 49")) + 
+  scale_fill_manual(values = c("3.3C_redR"='#876946', "amb_amb "= '#8A9677')) +
+  theme_bw() +
+  theme(legend.position = "right", plot.title = element_text(hjust = 0.5, face = "bold")) +
+  labs(title = "Simple C") +
+  ylab(bquote(A["590"])) +
+  ylim(0,0.3)
+
+SC
+#ggsave(file="SC_biolog.svg", width = 4, height = 4, dpi = 300)
+
+CC <- ggplot(ComplexC, aes(y= CAWCD, x = Day, fill = Treatment_broad)) +
+ stat_boxplot(geom = "errorbar", width=0.2, position = position_dodge(1)) +
+  geom_boxplot(position = position_dodge(1), outlier.shape = NA) + 
+  geom_point(aes(fill = Treatment_broad, group = Treatment_broad), color="black", alpha  =0.4, size=1, 
+                 position = position_jitterdodge(jitter.width = .1, dodge.width = 1)) +
+  labs(x=element_blank()) +
+  scale_x_discrete(limits = c("Day 7", "Day 49")) + 
+  scale_fill_manual(values = c("3.3C_redR"='#876946', "amb_amb "= '#8A9677')) +
+  theme_bw() +
+  theme(legend.position = "none", plot.title = element_text(hjust = 0.5, face = "bold")) +
+  labs(title = "Complex C") +
+  ylab(bquote(A["590"])) +
+  ylim(0,0.3)
+
+CC
+#ggsave(file="CC_biolog.svg", width = 4, height = 4, dpi = 300)
+
+NR <- ggplot(Nrich, aes(y= CAWCD, x = Day, fill = Treatment_broad)) +
+ stat_boxplot(geom = "errorbar", width=0.2, position = position_dodge(1)) +
+  geom_boxplot(position = position_dodge(1), outlier.shape = NA) + 
+  geom_point(aes(fill = Treatment_broad, group = Treatment_broad), color="black", alpha  =0.4, size=1, 
+                 position = position_jitterdodge(jitter.width = .1, dodge.width = 1)) +
+  labs(x=element_blank()) +
+  scale_x_discrete(limits = c("Day 7", "Day 49")) + 
+  scale_fill_manual(values = c("3.3C_redR"='#876946', "amb_amb "= '#8A9677')) +
+  theme_bw() +
+  theme(legend.position = "right", plot.title = element_text(hjust = 0.5, face = "bold")) +
+  labs(title = "N rich") +
+  ylab(bquote(A["590"])) +
+  ylim(0,0.3)
+
+NR
+#ggsave(file="NR_biolog.svg", width = 4, height = 4, dpi = 300)
+
+```
+
+
+## Patchwork
+```{r}
+library(patchwork)
+library(ggpubr)
+
+List <- list(AWCD, SC, CC, NR)
+## Plot long format
+#fig.height=4, fig.width=8
+plot <- wrap_plots(List,ncol = 2, nrow = 2)
+plot <- patchwork::patchworkGrob(plot)
+
+plots <- as_ggplot(plot) 
+plots
+ggsave(file="Figure2_Biologs.pdf",width = 8, height = 8, dpi = 300)
+
+ggarrange(AWCD + theme(axis.text.x = element_blank()), 
+         SC + theme(axis.text.x = element_blank(), axis.title.y = element_blank()), 
+          CC, NR + theme(), 
+          ncol = 2, nrow = 2, common.legend = T, align = "hv", legend = "bottom")
+
+
+#ggsave(file="Figure2_Biologs.svg",width = 8, height = 8, dpi = 300)
+
+```
+
+
+
+
